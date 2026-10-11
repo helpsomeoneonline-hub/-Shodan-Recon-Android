@@ -316,7 +316,7 @@ public final class CameraViewerActivity extends Activity {
                     if (test) runOnUiThread(() -> { if (generation.get() == token) { cancelTestTimeout(); active = false; } });
                 }
             });
-        } catch (Exception e) { active = false; setStatus(failure(e)); }
+        } catch (Exception e) { stopTransport(); setStatus(failure(e)); }
     }
 
     private WebView createBrowser() {
