@@ -1,4 +1,4 @@
-# Shodan Recon Android 1.2
+# Shodan Recon Android 1.2.1
 
 Standalone Android 8+ app extending the existing Java/WebView project. Package
 `com.shodanrecon.mobile`, existing `recon_local_v1` search data and Shodan
@@ -60,6 +60,10 @@ path or same-origin URL for other brands. Default channels are 101, 201, 301,
 
 Passwords are never included in snapshot filenames, diagnostics, activity logs
 or configuration export. Private images are removed on uninstall; exported copies survive.
+
+## Export a diagnostic report
+
+Open **Settings → Diagnostic log → Export Diagnostics**. Choose where to save the text file, then attach it to your ChatGPT conversation. The log includes timestamps, app action categories, HTTP status codes, and JavaScript error line numbers. It is stored privately on the phone and rotated automatically after approximately 128 KB. No API keys, passwords, full camera URLs, device IPs or camera images are written. Review the exported text before sending it. The Clear log button deletes prior events without affecting any camera or search data.
 
 ## Build and install
 
