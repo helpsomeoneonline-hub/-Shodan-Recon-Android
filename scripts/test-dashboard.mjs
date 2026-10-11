@@ -118,7 +118,7 @@ const result = (ip, port = 80, product = 'Camera') => ({ ip, port, product, coun
 test('specified defaults are preserved and startup makes no network request', () => {
   const ui = dashboard();
   assert.deepEqual(ui.state().settings, { query, pages: 1, limit: 100, repeatThreshold: 0.5, delayMs: 1000,
-    concurrency: 5, lanStart: '192.168.1.1', lanEnd: '192.168.1.10', ports: '80,443,554,8080' });
+    concurrency: 20, lanStart: '192.168.1.1', lanEnd: '192.168.1.10', ports: '80,443,554,8080' });
   assert.equal(ui.calls.length, 0);
 });
 
