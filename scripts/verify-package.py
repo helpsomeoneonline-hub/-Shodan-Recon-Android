@@ -76,7 +76,7 @@ if args.apk:
     version_name = re.search(r"\bversionName\s+['\"]([^'\"]+)['\"]", gradle_file)
     assert version_name is not None and "versionName='" + version_name.group(1) + "'" in identity, 'APK version name does not match Gradle'
     signing = subprocess.check_output([str(toolset / 'apksigner'), 'verify', '--print-certs', str(args.apk)], text=True)
-    certificates = re.findall(r'^Signer[^\n]*certificate SHA-256 digest:\s*([a-fA-F0-9:\s]+)\s*$', signing, re.MULTILINE | re.IGNORECASE)
+    certificates = re.findall(r'^(?:V\d+\s+)?Signer[^\n]*certificate SHA-256 digest:\s*([a-fA-F0-9:]+)\s*$', signing, re.MULTILINE | re.IGNORECASE)
     # Public certificate of the existing committed development key; no private
     # key or account secret is accessed by this comparison.
     expected_certificate = '470633fe1ecb95ada9e18ca05e2b7d370bf3c5066a3cf793d6f3c5363ca03088'
