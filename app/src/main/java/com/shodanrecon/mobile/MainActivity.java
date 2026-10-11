@@ -273,6 +273,31 @@ public class MainActivity extends Activity {
                 startActivityForResult(in, REQUEST_EXPORT);
             });
         }
+        @JavascriptInterface public void openHttpCamera(String address, boolean snapshot, String channel) {
+            try {
+                if (address == null || address.length() > 1024) throw new Exception("Enter a camera URL");
+                Uri uri = Uri.parse(address.trim());
+                String scheme = uri.getScheme();
+                if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme))
+                    throw new Exception("Use an http:// or https:// camera address");
+                if (uri.getUserInfo() != null) throw new Exception("Do not put passwords in the URL");
+                String host = uri.getHost();
+                if (host == null || !privateIP(parseIPv4(host)))
+                    throw new Exception("Use an authorized private-network IPv4 camera address");
+                int port = uri.getPort();
+                if (port > 65535 || port == 0) throw new Exception("Invalid camera port");
+                if (snapshot) {
+                    if (channel == null || !channel.matches("[0-9]{3,5}")) throw new Exception("Invalid channel");
+                    uri = uri.buildUpon().encodedPath("/ISAPI/Streaming/channels/" + channel + "/picture")
+                            .clearQuery().fragment(null).build();
+                }
+                final Uri destination = uri;
+                runOnUiThread(() -> {
+                    try { startActivity(new Intent(Intent.ACTION_VIEW, destination)); }
+                    catch(Exception e) { sendError("notice", "No compatible browser installed"); }
+                });
+            } catch(Exception ex) { sendError("notice", ex.getMessage()); }
+        }
         @JavascriptInterface public void openRTSP(String url) {
             if (url == null || !url.startsWith("rtsp://") || url.length() > 2000) { sendError("notice", "Enter a valid rtsp:// URL"); return; }
             runOnUiThread(() -> { try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
