@@ -70,7 +70,7 @@ if args.apk:
     identity = badging.splitlines()[0]
     assert "name='com.shodanrecon.mobile'" in identity, 'Android package identity changed'
     gradle_file = Path('app/build.gradle').read_text(encoding='utf-8')
-    version_match = re.search(r'\\bversionCode\\s+(\\d+)\\b', gradle_file)
+    version_match = re.search(r'\bversionCode\s+(\d+)\b', gradle_file)
     assert version_match is not None, 'Unable to find app version code in Gradle'
     assert "versionCode='" + version_match.group(1) + "'" in identity, 'APK version code does not match Gradle'
     subprocess.run([str(toolset / 'apksigner'), 'verify', str(args.apk)], check=True, capture_output=True)
