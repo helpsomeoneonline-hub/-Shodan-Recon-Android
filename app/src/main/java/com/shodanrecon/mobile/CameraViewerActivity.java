@@ -253,6 +253,9 @@ public final class CameraViewerActivity extends Activity {
     }
 
     private void setStatus(String message) {
+        if (message != null && message.matches("(?is).*(?:failed|failure|timed out|timeout|blocked|denied|error|HTTP [45][0-9]{2}|certificate|unavailable).*")) {
+            new DiagnosticLog(this).add("viewer", "status", DiagnosticLog.errorCode(message));
+        }
         diagnostic = message;
         if (status != null) status.setText(message);
     }
@@ -270,6 +273,7 @@ public final class CameraViewerActivity extends Activity {
     }
 
     private void connect(boolean test) {
+        new DiagnosticLog(this).add("viewer", test ? "test" : "connect", DiagnosticLog.atom(method));
         stopTransport();
         if (path().trim().isEmpty()) { setStatus("Set a " + method.toUpperCase() + " path in the camera profile first."); return; }
         active = true;
