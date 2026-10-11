@@ -51,10 +51,13 @@ public class MainActivity extends Activity {
     private static final String KEY_ALIAS = "shodan_recon_api_v1";
     private static final int REQUEST_IMPORT = 501;
     private static final int REQUEST_EXPORT = 502;
+    private static final int REQUEST_DIAGNOSTICS = 503;
     private final ExecutorService pool = Executors.newFixedThreadPool(3);
     private WebView webView;
     private SharedPreferences prefs;
     private String pendingCsv = "";
+    private String pendingDiagnostics = "";
+    private DiagnosticLog diagnostics;
     private CameraBridge cameras;
     private volatile String activeSearchToken = "";
     private volatile okhttp3.Call searchConnection;
@@ -83,6 +86,8 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
         prefs = getSharedPreferences(STORE, MODE_PRIVATE);
+        diagnostics = new DiagnosticLog(this);
+        diagnostics.add("app", "started", "ok");
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -108,6 +113,13 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
+        webView.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override public boolean onConsoleMessage(android.webkit.ConsoleMessage msg) {
+                if (msg.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR)
+                    diagnostics.add("js", "console-error", "line-" + Math.min(99999, Math.max(0, msg.lineNumber())));
+                return false;
+            }
+        });
         webView.addJavascriptInterface(new Bridge(), "ReconNative");
         cameras = new CameraBridge(this, this::send);
         webView.addJavascriptInterface(cameras, "ReconCameras");
@@ -117,6 +129,13 @@ public class MainActivity extends Activity {
     }
 
     private void send(String kind, JSONObject payload) {
+        if (diagnostics != null) {
+            if (!payload.optBoolean("ok", true))
+                diagnostics.add(kind.startsWith("camera-") ? "camera" : "network", kind,
+                        DiagnosticLog.errorCode(payload.optString("error", "")));
+            else if ("api-info".equals(kind) || "search".equals(kind) || "lan-done".equals(kind))
+                diagnostics.add("network", kind, "ok");
+        }
         String js = "window.receiveNative(" + JSONObject.quote(kind) + "," + payload.toString() + ")";
         runOnUiThread(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
     }
@@ -323,6 +342,36 @@ public class MainActivity extends Activity {
 
     public class Bridge {
         @JavascriptInterface public String getState() { return prefs.getString("state", "{}"); }
+        @JavascriptInterface public String getDiagnostics() { return diagnostics.text(); }
+        @JavascriptInterface public void clearDiagnostics() { diagnostics.clear(); }
+        @JavascriptInterface public void reportJavascriptError(String source, int line) {
+            if (!"dashboard".equals(source) && !"camera".equals(source) && !"promise".equals(source)) return;
+            diagnostics.add("js", source, "line-" + Math.min(99999, Math.max(0, line)));
+        }
+        @JavascriptInterface public void recordDiagnostic(String area, String event) {
+            if (area == null || event == null
+                    || !area.matches("app|ui|search|lan|camera")
+                    || !event.matches("start|stop|complete|cancel|viewer|capture|export|settings|import"))
+                return;
+            diagnostics.add(area, event, "event");
+        }
+        @JavascriptInterface public void exportDiagnostics() {
+            pendingDiagnostics = diagnostics.text();
+            runOnUiThread(() -> {
+                try {
+                    Intent in = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    in.addCategory(Intent.CATEGORY_OPENABLE);
+                    in.setType("text/plain");
+                    String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
+                            .format(new java.util.Date());
+                    in.putExtra(Intent.EXTRA_TITLE, "shodan-recon-diagnostics-" + stamp + ".txt");
+                    startActivityForResult(in, REQUEST_DIAGNOSTICS);
+                } catch (Exception e) {
+                    pendingDiagnostics = "";
+                    sendError("diagnostics-export", "Unable to open the document picker.");
+                }
+            });
+        }
         @JavascriptInterface public void saveState(String json) {
             if (json != null && json.length() <= 900000) prefs.edit().putString("state", json).apply();
             else sendError("notice", "Saved history is too large. Export results or clear old sessions.");
@@ -456,6 +505,19 @@ public class MainActivity extends Activity {
                 }
                 JSONObject j = new JSONObject(); j.put("ok", true); j.put("text", out.toString("UTF-8")); send("ip-import", j);
             } catch(Exception ex) { sendError("ip-import", ex.getMessage()); } });
+        } else if (requestCode == REQUEST_DIAGNOSTICS) {
+            final String content = pendingDiagnostics;
+            pendingDiagnostics = "";
+            pool.submit(() -> {
+                try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                    if (out == null) throw new Exception("Cannot create the selected diagnostics file.");
+                    out.write(content.getBytes(StandardCharsets.UTF_8));
+                    send("diagnostics-export", new JSONObject().put("ok", true).put("message", "Diagnostic log exported."));
+                    diagnostics.add("app", "exported", "ok");
+                } catch (Exception e) {
+                    sendError("diagnostics-export", "Could not write the diagnostics file.");
+                }
+            });
         } else if (requestCode == REQUEST_EXPORT) {
             pool.submit(() -> { try (OutputStream out = getContentResolver().openOutputStream(uri)) {
                 if (out == null) throw new Exception("Cannot write file");
@@ -467,6 +529,7 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         activeSearchToken = "";
         activeScanToken = "";
+        if (diagnostics != null) diagnostics.add("app", "stopped", "ok");
         if (searchConnection != null) searchConnection.cancel();
         if (activeScan != null) activeScan.cancel();
         pool.shutdownNow();
