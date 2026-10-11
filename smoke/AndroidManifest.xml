@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.shodanrecon.smoke">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="30" />
+    <application android:label="Shodan Recon smoke harness" android:debuggable="true" android:allowBackup="false" />
+    <instrumentation android:name="com.shodanrecon.smoke.SmokeInstrumentation" android:targetPackage="com.shodanrecon.mobile" android:functionalTest="true" />
+</manifest>

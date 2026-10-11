@@ -7,3 +7,10 @@ local.properties
 !app/development-debug.keystore
 .env
 
+
+*.apk
+
+__pycache__/
+smoke-build/
+smoke-results/
+smoke-apk/
