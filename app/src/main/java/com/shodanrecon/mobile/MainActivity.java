@@ -321,7 +321,7 @@ public class MainActivity extends Activity {
             final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
             final java.util.concurrent.atomic.AtomicInteger checked = new java.util.concurrent.atomic.AtomicInteger();
             final java.util.concurrent.atomic.AtomicInteger found = new java.util.concurrent.atomic.AtomicInteger();
-            int concurrency = Math.max(1, Math.min(8, c.optInt("workers", 5)));
+            int concurrency = Math.max(1, Math.min(20, c.optInt("workers", 20)));
             workers = Executors.newFixedThreadPool(concurrency);
             java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
             for (int i = 0; i < concurrency; i++) futures.add(workers.submit(() -> {

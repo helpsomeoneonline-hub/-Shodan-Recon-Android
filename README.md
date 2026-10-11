@@ -1,4 +1,4 @@
-# Shodan Recon Android 1.3.0
+# Shodan Recon Android 1.3.1
 
 Standalone Android 8+ app extending the existing Java/WebView project. Package
 `com.shodanrecon.mobile`, existing `recon_local_v1` search data and Shodan
@@ -8,7 +8,7 @@ Keystore alias are preserved. No Node.js server is required.
 
 - Shodan searches and account credits with your own key entered in Settings.
 - Defaults: `port:80 (DNVRS-Webs OR Hikvision-Webs OR web OR App-webs OR DVRDVS-Webs)`,
-  limit 100, repeat threshold 0.5, delay 1000 ms, one page, concurrency five.
+  limit 100, repeat threshold 0.5, delay 1000 ms, one page, private-LAN TCP workers 20 by default (configurable 1–20).
 - Saved search queries/profiles, favorites, paginated discovery, filters, sorting,
   history, TXT/CSV IP import and CSV export of the displayed results.
 - Results and saved IPs identify Shodan, private-network scans and imported addresses.

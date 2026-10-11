@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1 — versionCode 6
+
+- Allow 1–20 parallel TCP port inventory workers for authorized RFC1918 private-network scans; default 20 for new installs.
+- Keep the existing 256-address, eight-port, cancellation, and authorization constraints. This change does not attempt camera passwords.
+- Preserve the existing camera snapshot, Shodan discovery, saved credentials, and export behavior.
+
 ## 1.3.0 — versionCode 5
 
 - Add sequential Automatic Camera Manager with multi-selection, Start/Stop,

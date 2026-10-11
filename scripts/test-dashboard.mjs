@@ -118,7 +118,7 @@ const result = (ip, port = 80, product = 'Camera') => ({ ip, port, product, coun
 test('specified defaults are preserved and startup makes no network request', () => {
   const ui = dashboard();
   assert.deepEqual(ui.state().settings, { query, pages: 1, limit: 100, repeatThreshold: 0.5, delayMs: 1000,
-    concurrency: 5, lanStart: '192.168.1.1', lanEnd: '192.168.1.10', ports: '80,443,554,8080' });
+    concurrency: 20, lanStart: '192.168.1.1', lanEnd: '192.168.1.10', ports: '80,443,554,8080' });
   assert.equal(ui.calls.length, 0);
 });
 
@@ -195,7 +195,16 @@ test('selected IP scanning requires explicit scope authorization and omits publi
   ui.element('scan-authorized').checked = true; ui.input('shodan-delay', 2000); ui.click('start-search');
   const config = JSON.parse(ui.callsTo('scanAuthorized')[0].args[0]);
   assert.deepEqual(config.ips, ['192.168.1.2', '10.0.0.3']);
-  assert.equal(config.authorized, true); assert.equal(config.delayMs, 2000); assert.equal(config.workers, 5);
+  assert.equal(config.authorized, true); assert.equal(config.delayMs, 2000); assert.equal(config.workers, 20);
+});
+
+test('private-network workers are capped to 20 and can be reduced', () => {
+  const ui = dashboard({ ipList: ['192.168.1.10'], selectedIPs: ['192.168.1.10'] });
+  ui.click('scan-selected-ips');
+  ui.element('scan-authorized').checked = true;
+  ui.input('lan-workers', 100);
+  ui.click('start-search');
+  assert.equal(JSON.parse(ui.callsTo('scanAuthorized')[0].args[0]).workers, 20);
 });
 
 test('CSV export neutralizes spreadsheet formula prefixes and quotes fields', () => {
