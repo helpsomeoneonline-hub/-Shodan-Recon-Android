@@ -477,7 +477,10 @@
     }
     const message = data.error || data.message || (data.ok === false ? 'Camera operation failed.' : 'Camera operation completed.');
     if (data.action === 'save-camera' && data.ok === false) pendingCameraForm = null;
-    if (presetSavePending && data.action === 'save-presets') {
+    // Android may deliver a native acknowledgement after a state refresh. A successful
+    // save always clears transient password input, even when the pending flag was
+    // already reset by another callback; failed saves retain the unsaved edits.
+    if (data.action === 'save-presets') {
       presetSavePending = false;
       if (data.ok !== false && !data.error) {
         usernameDirty = false;
