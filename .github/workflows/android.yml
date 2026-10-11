@@ -1,17 +1,30 @@
 name: Build Android APK
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
+  pull_request:
     paths:
       - 'app/**'
+      - 'scripts/**'
       - 'build.gradle'
       - 'settings.gradle'
       - 'gradle.properties'
       - '.github/workflows/android.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'scripts/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle.properties'
+      - '.github/workflows/android.yml'
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -23,11 +36,35 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate dashboard JavaScript
+        run: |
+          node scripts/check-dashboard.mjs
+          node scripts/test-dashboard.mjs
+          python3 scripts/verify-package.py
+      - name: Test, lint and build debug APK
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+      - name: Verify packaged APK
+        run: python3 scripts/verify-package.py --apk app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShodanRecon-verification
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: warn
+          retention-days: 30
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ShodanRecon-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 14
+          if-no-files-found: error
+          retention-days: 30
+

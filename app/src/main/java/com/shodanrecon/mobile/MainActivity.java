@@ -52,11 +52,33 @@ public class MainActivity extends Activity {
     private static final int REQUEST_IMPORT = 501;
     private static final int REQUEST_EXPORT = 502;
     private final ExecutorService pool = Executors.newFixedThreadPool(3);
-    private final AtomicBoolean cancelLAN = new AtomicBoolean(false);
-    private final AtomicBoolean lanActive = new AtomicBoolean(false);
     private WebView webView;
     private SharedPreferences prefs;
     private String pendingCsv = "";
+    private CameraBridge cameras;
+    private volatile String activeSearchToken = "";
+    private volatile okhttp3.Call searchConnection;
+    private final okhttp3.OkHttpClient shodanClient = new okhttp3.OkHttpClient.Builder()
+            .connectTimeout(12, java.util.concurrent.TimeUnit.SECONDS).readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false)
+            .retryOnConnectionFailure(false).build();
+    private volatile ScanRun activeScan;
+    private volatile String activeScanToken = "";
+    private static final class ScanRun {
+        final String token;
+        final AtomicBoolean cancelled = new AtomicBoolean();
+        final Set<Socket> sockets = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        long nextStart;
+        ScanRun(String token) { this.token = token; }
+        void cancel() { cancelled.set(true); for (Socket socket : sockets) try { socket.close(); } catch(Exception ignored) {} }
+        synchronized boolean pace(int delay) throws InterruptedException {
+            long wait = nextStart - android.os.SystemClock.elapsedRealtime();
+            while (wait > 0 && !cancelled.get()) { wait(Math.min(wait, 100)); wait = nextStart - android.os.SystemClock.elapsedRealtime(); }
+            if (cancelled.get()) return false;
+            nextStart = android.os.SystemClock.elapsedRealtime() + delay;
+            return true;
+        }
+    }
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
@@ -65,11 +87,20 @@ public class MainActivity extends Activity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
         settings.setAllowFileAccessFromFileURLs(false);
         settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
         settings.setMediaPlaybackRequiresUserGesture(true);
         webView.setWebViewClient(new WebViewClient() {
+            @Override public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if ("file".equals(uri.getScheme()) && uri.getPath() != null && uri.getPath().startsWith("/android_asset/")) return null;
+                if ("data".equals(uri.getScheme())) return null;
+                return new android.webkit.WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden",
+                        java.util.Collections.emptyMap(), new java.io.ByteArrayInputStream(new byte[0]));
+            }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 if ("file".equals(uri.getScheme()) && "/android_asset/index.html".equals(uri.getPath())) return false;
@@ -78,6 +109,8 @@ public class MainActivity extends Activity {
             }
         });
         webView.addJavascriptInterface(new Bridge(), "ReconNative");
+        cameras = new CameraBridge(this, this::send);
+        webView.addJavascriptInterface(cameras, "ReconCameras");
         webView.setBackgroundColor(0xff03101e);
         setContentView(webView);
         webView.loadUrl("file:///android_asset/index.html");
@@ -88,6 +121,8 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
     }
     private void sendError(String kind, String message) {
+        if (message != null && (message.contains("key=") || message.contains("api.shodan.io")))
+            message = "Network request failed. Check your connection and try again.";
         JSONObject out = new JSONObject();
         try { out.put("ok", false); out.put("error", message == null ? "Unknown error" : message); } catch(Exception ignored) {}
         send(kind, out);
@@ -118,25 +153,37 @@ public class MainActivity extends Activity {
         return new String(cipher.doFinal(Base64.decode(bits[1], Base64.NO_WRAP)), StandardCharsets.UTF_8);
     }
     private JSONObject shodanRequest(String endpoint, String query, int page) throws Exception {
+        return shodanRequest(endpoint, query, page, null);
+    }
+    private JSONObject shodanRequest(String endpoint, String query, int page, String token) throws Exception {
         String key = readApiKey();
         if (key.isEmpty()) throw new Exception("Enter your Shodan API key in Settings first.");
         String url = "https://api.shodan.io/" + endpoint + "?key=" + URLEncoder.encode(key, "UTF-8");
         if (query != null) url += "&query=" + URLEncoder.encode(query, "UTF-8") + "&page=" + page;
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(12000); conn.setReadTimeout(20000);
-        conn.setRequestProperty("Accept", "application/json");
-        int status = conn.getResponseCode();
-        InputStream stream = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
-        StringBuilder body = new StringBuilder();
-        if (stream != null) try (BufferedReader in = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            String line; while ((line = in.readLine()) != null && body.length() < 1200000) body.append(line);
+        okhttp3.Call call = shodanClient.newCall(new okhttp3.Request.Builder().url(url).header("Accept", "application/json").build());
+        if (token != null) synchronized (this) {
+            if (!token.equals(activeSearchToken)) { call.cancel(); throw new Exception("Search cancelled"); }
+            searchConnection = call;
         }
-        conn.disconnect();
-        JSONObject json;
-        try { json = new JSONObject(body.toString()); } catch(Exception e) { throw new Exception("Unexpected Shodan reply (HTTP " + status + ")"); }
-        if (status >= 400) throw new Exception("Shodan HTTP " + status + ": " + json.optString("error", "Request failed"));
-        return json;
+        try (okhttp3.Response response = call.execute()) {
+            int status = response.code();
+            if (response.isRedirect()) throw new Exception("Unexpected Shodan redirect (HTTP " + status + ")");
+            java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+            if (response.body() != null) try (InputStream stream = response.body().byteStream()) {
+                byte[] buffer = new byte[16384]; int n;
+                while ((n = stream.read(buffer)) != -1) {
+                    if (body.size() + n > 1200000) throw new Exception("Shodan reply exceeds the supported response size.");
+                    body.write(buffer, 0, n);
+                }
+            }
+            JSONObject json;
+            try { json = new JSONObject(body.toString("UTF-8")); }
+            catch(Exception e) { throw new Exception("Unexpected Shodan reply (HTTP " + status + ")"); }
+            if (status >= 400) throw new Exception("Shodan HTTP " + status + ": " + json.optString("error", "Request failed").replace(key, "[redacted]"));
+            return json;
+        } finally { synchronized(this) { if (searchConnection == call) searchConnection = null; } }
     }
+
     private JSONObject summarizeShodan(JSONObject raw) throws Exception {
         JSONObject result = new JSONObject(); result.put("ok", true);
         result.put("total", raw.optInt("total", 0));
@@ -179,76 +226,95 @@ public class MainActivity extends Activity {
     private String formatIP(long value) {
         return ((value >>> 24) & 255) + "." + ((value >>> 16) & 255) + "." + ((value >>> 8) & 255) + "." + (value & 255);
     }
-    // Bounded TCP service inventory for a single authorized private IPv4 /24 network.
-    private void doLANScan(String start, String end, String portCSV, int workers) {
-        if (!lanActive.compareAndSet(false, true)) {
-            sendError("lan-done", "A LAN scan is already in progress"); return;
-        }
-        cancelLAN.set(false);
-        ExecutorService workerPool = null;
+    // Bounded service inventory; it never sends device credentials.
+    private void doAuthorizedScan(String config) {
+        ScanRun run = null;
+        ExecutorService workers = null;
+        String token = "";
         try {
-            final long firstIP = parseIPv4(start), lastIP = parseIPv4(end);
-            if (lastIP < firstIP || lastIP - firstIP > 255)
-                throw new Exception("Range must contain at most 256 addresses");
-            if (!privateIP(firstIP) || !privateIP(lastIP) || (firstIP >>> 8) != (lastIP >>> 8))
-                throw new Exception("LAN scan supports one authorized private /24 network only");
-            java.util.Set<Integer> portsSet = new java.util.HashSet<>();
-            for (String part : portCSV.split(",")) {
-                if (part.trim().isEmpty()) continue;
-                int port = Integer.parseInt(part.trim());
-                if (port < 1 || port > 65535) throw new Exception("Ports must be from 1 to 65535");
-                portsSet.add(port);
-                if (portsSet.size() > 8) throw new Exception("Use at most eight ports");
+            JSONObject c = new JSONObject(config);
+            token = c.optString("token");
+            if (token.isEmpty() || !c.optBoolean("authorized")) throw new Exception("Confirm you are authorized to scan this network.");
+            java.util.LinkedHashSet<String> addresses = new java.util.LinkedHashSet<>();
+            JSONArray list = c.optJSONArray("ips");
+            if (list != null) {
+                if (list.length() > 256) throw new Exception("Select at most 256 private IP addresses per scan.");
+                for (int i = 0; i < list.length(); i++) {
+                    long value = parseIPv4(list.getString(i));
+                    if (!privateIP(value)) throw new Exception("Direct scanning is limited to authorized private IPv4 addresses.");
+                    addresses.add(formatIP(value));
+                }
+            } else {
+                long first = parseIPv4(c.optString("start")), last = parseIPv4(c.optString("end"));
+                if (last < first || last - first > 255) throw new Exception("Range must contain at most 256 addresses.");
+                if (!privateIP(first) || !privateIP(last) || (first >>> 8) != (last >>> 8))
+                    throw new Exception("Select one authorized private /24 network.");
+                for (long n = first; n <= last; n++) addresses.add(formatIP(n));
             }
-            if (portsSet.isEmpty()) throw new Exception("Enter at least one port");
-            final java.util.List<Integer> ports = new java.util.ArrayList<>(portsSet);
-            java.util.Collections.sort(ports);
-            final int total = (int)(lastIP - firstIP + 1);
-            final java.util.concurrent.atomic.AtomicInteger nextIndex = new java.util.concurrent.atomic.AtomicInteger();
-            final java.util.concurrent.atomic.AtomicInteger scanned = new java.util.concurrent.atomic.AtomicInteger();
+            if (addresses.isEmpty()) throw new Exception("Choose at least one private IP address.");
+            java.util.Set<Integer> portSet = new java.util.TreeSet<>();
+            for (String part : c.optString("ports", "80,443,554,8080").split(",")) {
+                int port = Integer.parseInt(part.trim());
+                if (port < 1 || port > 65535) throw new Exception("Ports must be from 1 to 65535.");
+                portSet.add(port);
+            }
+            if (portSet.isEmpty() || portSet.size() > 8) throw new Exception("Select one to eight ports.");
+            synchronized (this) {
+                if (!token.equals(activeScanToken)) return;
+                if (activeScan != null) throw new Exception("Previous scan is stopping. Try again shortly.");
+                run = new ScanRun(token); activeScan = run;
+            }
+            final ScanRun taskRun = run;
+            final java.util.List<String> ips = new java.util.ArrayList<>(addresses);
+            final java.util.List<Integer> ports = new java.util.ArrayList<>(portSet);
+            final int delay = Math.max(0, Math.min(30000, c.optInt("delayMs", 1000)));
+            final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
+            final java.util.concurrent.atomic.AtomicInteger checked = new java.util.concurrent.atomic.AtomicInteger();
             final java.util.concurrent.atomic.AtomicInteger found = new java.util.concurrent.atomic.AtomicInteger();
-            int workerCount = Math.max(1, Math.min(8, workers));
-            workerPool = Executors.newFixedThreadPool(workerCount);
-            java.util.List<java.util.concurrent.Future<?>> tasks = new java.util.ArrayList<>();
-            for (int i = 0; i < workerCount; i++) {
-                tasks.add(workerPool.submit(() -> {
-                    while (!cancelLAN.get()) {
-                        int position = nextIndex.getAndIncrement();
-                        if (position >= total) return;
-                        String ip = formatIP(firstIP + position);
-                        for (int port : ports) {
-                            if (cancelLAN.get()) break;
-                            try (Socket socket = new Socket()) {
-                                socket.connect(new InetSocketAddress(ip, port), 450);
+            int concurrency = Math.max(1, Math.min(8, c.optInt("workers", 5)));
+            workers = Executors.newFixedThreadPool(concurrency);
+            java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+            for (int i = 0; i < concurrency; i++) futures.add(workers.submit(() -> {
+                while (!taskRun.cancelled.get()) {
+                    int index = next.getAndIncrement();
+                    if (index >= ips.size()) break;
+                    String ip = ips.get(index);
+                    try { if (!taskRun.pace(delay)) break; } catch(InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                    for (int port : ports) {
+                        if (taskRun.cancelled.get()) break;
+                        try (Socket socket = new Socket()) {
+                            taskRun.sockets.add(socket);
+                            try {
+                                if (taskRun.cancelled.get()) break;
+                                socket.connect(new InetSocketAddress(ip, port), 750);
+                                if (taskRun.cancelled.get()) break;
                                 found.incrementAndGet();
                                 JSONObject item = new JSONObject();
-                                item.put("ok", true); item.put("ip", ip);
-                                item.put("port", port); item.put("product", "TCP service");
-                                item.put("country", "LAN");
-                                item.put("org", "Authorized private network");
+                                item.put("ok", true).put("token", taskRun.token).put("ip", ip).put("port", port)
+                                    .put("product", "TCP service").put("country", "LAN").put("org", "Authorized private network");
                                 send("lan-match", item);
-                            } catch (Exception ignored) {}
-                        }
-                        JSONObject progress = new JSONObject();
-                        try {
-                            progress.put("ok", true);
-                            progress.put("scanned", scanned.incrementAndGet());
-                            progress.put("found", found.get());
-                            progress.put("total", total);
-                            send("lan-progress", progress);
-                        } catch (Exception ignored) {}
+                            } finally { taskRun.sockets.remove(socket); }
+                        } catch(Exception ignored) {}
                     }
-                }));
-            }
-            for (java.util.concurrent.Future<?> task : tasks) task.get();
+                    if (!taskRun.cancelled.get()) try {
+                        JSONObject progress = new JSONObject();
+                        progress.put("ok", true).put("token", taskRun.token).put("scanned", checked.incrementAndGet())
+                            .put("found", found.get()).put("total", ips.size());
+                        send("lan-progress", progress);
+                    } catch(Exception ignored) {}
+                }
+            }));
+            for (java.util.concurrent.Future<?> future : futures) future.get();
             JSONObject done = new JSONObject();
-            done.put("ok", true); done.put("stopped", cancelLAN.get());
-            done.put("scanned", scanned.get()); done.put("found", found.get());
+            done.put("ok", true).put("token", run.token).put("stopped", run.cancelled.get())
+                .put("scanned", checked.get()).put("found", found.get());
             send("lan-done", done);
-        } catch(Exception e) { sendError("lan-done", e.getMessage()); }
-        finally {
-            if (workerPool != null) workerPool.shutdownNow();
-            lanActive.set(false);
+        } catch(Exception e) {
+            try { send("lan-done", new JSONObject().put("ok", false).put("token", token).put("error", e instanceof NumberFormatException ? "Enter comma-separated numeric ports." : e.getMessage())); }
+            catch(Exception ignored) {}
+        } finally {
+            if (workers != null) workers.shutdownNow();
+            synchronized(this) { if (activeScan == run) activeScan = null; }
         }
     }
 
@@ -277,15 +343,42 @@ public class MainActivity extends Activity {
                 send("api-info", o);
             } catch(Exception ex) { sendError("api-info", ex.getMessage()); } });
         }
-        @JavascriptInterface public void searchShodan(String query, int page) {
-            if (query == null || query.trim().isEmpty() || query.length() > 400 || page < 1 || page > 5) {
-                sendError("search", "Enter a query and use pages 1–5."); return;
-            }
-            pool.submit(() -> { try { send("search", summarizeShodan(shodanRequest("shodan/host/search", query.trim(), page))); }
-                catch(Exception ex) { sendError("search", ex.getMessage()); } });
+        @JavascriptInterface public void searchShodanTagged(String query, int page, String token) {
+            if (token == null || token.isEmpty() || token.length() > 100) return;
+            activeSearchToken = token;
+            pool.submit(() -> {
+                try {
+                    if (query == null || query.trim().isEmpty() || query.length() > 400 || page < 1 || page > 5)
+                        throw new Exception("Enter a query and use pages 1–5.");
+                    JSONObject result = summarizeShodan(shodanRequest("shodan/host/search", query.trim(), page, token));
+                    result.put("token", token);
+                    if (token.equals(activeSearchToken)) send("search", result);
+                } catch(Exception e) {
+                    if (token.equals(activeSearchToken)) try {
+                        String message = e.getMessage();
+                        // Network libraries may include request URLs: never surface the key query.
+                        if (message == null || message.contains("key=") || message.contains("api.shodan.io")) message = "Shodan connection failed. Check network access and try again.";
+                        send("search", new JSONObject().put("ok", false).put("token", token).put("error", message));
+                    } catch(Exception ignored) {}
+                }
+            });
         }
-        @JavascriptInterface public void scanLAN(String start, String end, String ports, int workers) { pool.submit(() -> doLANScan(start, end, ports, workers)); }
-        @JavascriptInterface public void stopLAN() { cancelLAN.set(true); }
+        @JavascriptInterface public void scanAuthorized(String config) {
+            try { activeScanToken = new JSONObject(config).getString("token"); }
+            catch(Exception e) { sendError("notice", "Invalid scan configuration."); return; }
+            pool.submit(() -> doAuthorizedScan(config));
+        }
+        @JavascriptInterface public void stopSearch() {
+            okhttp3.Call conn;
+            synchronized (MainActivity.this) {
+                activeSearchToken = "";
+                activeScanToken = "";
+                conn = searchConnection;
+            }
+            if (conn != null) conn.cancel();
+            ScanRun run = activeScan;
+            if (run != null) run.cancel();
+        }
         @JavascriptInterface public void importIPs() {
             runOnUiThread(() -> {
                 Intent in = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -348,6 +441,7 @@ public class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (cameras != null) cameras.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         if (requestCode == REQUEST_IMPORT) {
@@ -368,8 +462,14 @@ public class MainActivity extends Activity {
         }
     }
     @Override protected void onDestroy() {
-        cancelLAN.set(true); pool.shutdownNow();
-        if (webView != null) { webView.removeJavascriptInterface("ReconNative"); webView.destroy(); webView = null; }
+        activeSearchToken = "";
+        activeScanToken = "";
+        if (searchConnection != null) searchConnection.cancel();
+        if (activeScan != null) activeScan.cancel();
+        pool.shutdownNow();
+        if (cameras != null) cameras.close();
+        if (webView != null) { webView.removeJavascriptInterface("ReconNative"); webView.removeJavascriptInterface("ReconCameras"); webView.destroy(); webView = null; }
         super.onDestroy();
     }
 }
+

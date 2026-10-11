@@ -1,29 +1,77 @@
-# Shodan Recon Android v1.1
+# Shodan Recon Android 1.2
 
-Standalone Android (Android 8+) app built with Java and a responsive WebView. It runs on the phone without a Node.js server.
+Standalone Android 8+ app extending the existing Java/WebView project. Package
+`com.shodanrecon.mobile`, existing `recon_local_v1` search data and Shodan
+Keystore alias are preserved. No Node.js server is required.
 
-## Working features
+## Discovery
 
-- Direct Shodan API search and API-credit information, with the key stored locally using Android Keystore encryption.
-- Default Shodan query: `port:80 (DNVRS-Webs OR Hikvision-Webs OR web OR App-webs OR DVRDVS-Webs)`.
-- Default search settings: 100 results, one page, repeat threshold 0.5, and a 1,000 ms delay between requested pages. Up to five pages can be selected.
-- Authorized private-network port inventory for up to 256 IPs in one /24 subnet, up to eight specified ports, and a configurable 1–8 worker limit (default five).
-- Search history, saved profiles, IP-list import, favorites, filters and CSV export.
-- Manual HTTP/HTTPS camera web-page opening for cameras on private IPv4 networks you administer.
-- Manual ISAPI snapshot-address opening in your browser with a channel selector (101–1601); authentication and image display depend on the camera/browser. **The app does not download or store these snapshots.**
-- Open user-entered RTSP streams in a compatible installed player, such as VLC.
-- Portrait, landscape and tablet screen layouts.
+- Shodan searches and account credits with your own key entered in Settings.
+- Defaults: `port:80 (DNVRS-Webs OR Hikvision-Webs OR web OR App-webs OR DVRDVS-Webs)`,
+  limit 100, repeat threshold 0.5, delay 1000 ms, one page, concurrency five.
+- Editable settings, profiles, favorites, result filters, history, IP import and CSV export.
+- Authorized private IPv4 range inventory (one /24, maximum 256 IPs/eight ports),
+  plus scanning selected imported private IPs. Shared pacing and configurable workers.
+- Stop disconnects requests and sockets; session IDs reject stale results. Results
+  persist during searches and interrupted sessions can be reviewed.
 
-## APK build
+## Authorized cameras
 
-Open **Actions → Build Android APK** and download the latest successful `ShodanRecon-debug-apk` artifact. This is a debug build rather than a Play Store release. Version 1.1 has `versionCode 2`, so it can update version 1.0 if installed with the same signing key.
+Register cameras in **Cameras**, confirm administration permission, save the host,
+HTTP(S)/RTSP ports and endpoint paths, then manually select a saved credential.
+Discovery results never initiate camera authentication.
 
-## Shodan API secret
+- Multiple profiles, Keystore AES-GCM encrypted usernames/passwords, edit/delete credentials.
+- Built-in isolated HTTP/HTTPS interface, JPEG and MJPEG viewing.
+- Media3 RTSP over TCP and compatible HLS, plus external RTSP player fallback.
+- Method/channel selection, connection tests, diagnostics and expandable viewer.
+- Rotation retention; network/playback stops when the viewer enters the background.
+- HTTP Basic and Digest (MD5/SHA-256/session variants, qop auth or legacy no-qop),
+  bounded authentication retries. No guessing or dictionary attacks.
+- HTTPS verifies certificate chains and hostnames, trusting system CAs and
+  CAs explicitly installed by the user in Android certificate settings. HTTP/HLS requests remain on the configured
+  origin; redirects and cross-origin resources are blocked. Save the actual
+  destination scheme, port and path.
 
-Your `SHODAN_API_KEY` GitHub Actions secret is **not embedded** in the APK. Enter the key once in **Settings → Shodan API** inside the Android app. It is encrypted on your device. A repository secret cannot be safely shipped inside an extractable APK.
+Built-in authenticated camera pages are read-only. Login/administration forms
+open in the Android browser without passing saved credentials; this avoids
+WebView redirects leaking credentials.
 
-## Boundaries and limitations
+Old browser plugins such as ActiveX cannot run on Android: use a compatible
+snapshot/stream endpoint. Codec support depends on Media3, firmware and the
+Android decoder. HLS media must use the same camera origin. External RTSP
+launches without saved passwords; enter credentials in the external player.
 
-Shodan results are discovery-only. Direct service checks and HTTP-camera links are restricted to explicitly supplied private IPv4 addresses. The app does not try password dictionaries, test credentials on public Shodan results, download protected camera snapshots, or include the old Node.js FFmpeg proxy. The manual HTTP camera viewer opens your system browser; it is not an in-app live-video decoder.
+## Snapshots
 
-Only connect to networks and cameras you own or have explicit permission to administer.
+Default template: `/ISAPI/Streaming/channels/{channel}/picture`. Use a manual
+path or same-origin URL for other brands. Default channels are 101, 201, 301,
+401, 501, 601, 701, 801, 901, 1001, 1101, 1201, 1301, 1401, 1501 and 1601.
+
+- Capture one channel or all selected channels from one registered camera.
+- Thumbnail gallery with camera name, IP/host, channel and capture time.
+- Preview, share, export, delete and bulk deletion of flagged images.
+- SHA-256 exact duplicates and empty/corrupt image review flags.
+- Progress, cancellation, bounded downloads and temporary-file cleanup.
+- Private app storage remains the primary copy. Android's folder picker selects
+  an optional secondary export folder. Copy failures preserve the primary image.
+- Camera configuration JSON transfer excludes credentials and requires explicit
+  authorization when registering imports. Re-select credentials after importing.
+
+Passwords are never included in snapshot filenames, diagnostics, activity logs
+or configuration export. Private images are removed on uninstall; exported copies survive.
+
+## Build and install
+
+Actions **Build Android APK** runs dashboard checks, Java unit tests, Android
+lint and debug APK assembly. Successful runs publish `ShodanRecon-debug-apk`
+and `ShodanRecon-verification` artifacts for 30 days. Extract and install `app-debug.apk`.
+
+Debug builds use a stable public development key. Read [DEBUG-SIGNING.md](DEBUG-SIGNING.md)
+before updating: earlier Actions used ephemeral signing keys, so an in-place
+update may be impossible without the original private key. Export data before
+any uninstall. The committed development key is not a production release key.
+
+The repository `SHODAN_API_KEY` secret is never read by the workflow or embedded
+in the app. Enter your key in Settings; it is encrypted on your device.
+See [TESTING.md](TESTING.md) for physical-device checks and compatibility limits.

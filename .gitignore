@@ -4,4 +4,6 @@ app/build/
 local.properties
 *.jks
 *.keystore
+!app/development-debug.keystore
 .env
+

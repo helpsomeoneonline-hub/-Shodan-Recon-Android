@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- HTTP cameras are explicitly configured by their administrator. HTTPS
+         still verifies hostname and certificate chains. A user-installed CA
+         supports cameras using an administrator's own certificate authority. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

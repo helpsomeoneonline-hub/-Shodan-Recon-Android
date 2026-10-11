@@ -1,0 +1,44 @@
+#view-cameras{margin-top:14px}
+#view-cameras .btn,#view-cameras input:not([type=checkbox]),#view-cameras select{min-height:48px}
+#view-cameras .cam-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-bottom:14px}
+#view-cameras .cam-tabs .btn{padding:10px 4px;font-size:12px}
+#view-cameras .cam-tabs .active{border-color:var(--cyan);color:var(--cyan);background:#12425c}
+#view-cameras .cam-layout{display:grid;gap:14px;align-items:start}
+#view-cameras .cam-pane{display:none}
+#view-cameras .cam-pane.active{display:block}
+#view-cameras .cam-card{border:1px solid #28536f;border-radius:12px;background:#071b30;padding:14px;overflow-wrap:anywhere;margin-top:10px}
+#view-cameras .cam-card.selected{border-color:var(--cyan);box-shadow:0 0 0 1px #00e5ff32}
+#view-cameras .cam-card h3,#view-cameras .cam-snapshot h3{font-size:14px;margin:0 0 8px}
+#view-cameras .cam-card .actions{margin-top:12px}
+#view-cameras .cam-advanced{margin:12px 0;padding:12px;border:1px solid var(--edge);border-radius:10px}
+#view-cameras .cam-advanced summary{cursor:pointer;min-height:40px;font-size:13px;color:var(--cyan);display:flex;align-items:center}
+#view-cameras .cam-check{display:flex;align-items:center;gap:10px;min-height:48px;font-size:12px;letter-spacing:0;text-transform:none;line-height:1.5}
+#view-cameras input[type=checkbox]{width:22px;height:22px;flex-shrink:0;accent-color:var(--cyan)}
+#view-cameras .cam-channels{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:12px 0}
+#view-cameras .cam-channel{border:1px solid #28536f;border-radius:9px;justify-content:center;background:#071b30;padding:4px;font-family:monospace;font-size:13px}
+#view-cameras .cam-channel:has(input:checked){border-color:var(--cyan);background:#12425c}
+#view-cameras .cam-channels input{width:18px;height:18px}
+#view-cameras .cam-diagnostics{white-space:pre-wrap;overflow-wrap:anywhere;background:#06111c;border:1px solid #28536f;padding:12px;border-radius:10px;min-height:70px;max-height:220px;overflow:auto;font:12px/1.6 monospace;color:var(--muted)}
+#view-cameras .cam-status{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:12px;border:1px solid var(--edge);border-radius:10px;background:#071b30;margin-bottom:14px}
+#view-cameras .cam-status[aria-busy=true]{border-color:var(--cyan)}
+#view-cameras .cam-status progress{width:100%;height:8px;accent-color:var(--cyan)}
+#view-cameras .cam-status-text{flex:1;font-size:12px;min-width:150px;overflow-wrap:anywhere}
+#view-cameras .cam-gallery{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
+#view-cameras .cam-snapshot{border:1px solid #28536f;border-radius:12px;background:#071b30;overflow:hidden;min-width:0}
+#view-cameras .cam-snapshot.flagged{border-color:var(--orange)}
+#view-cameras .cam-thumb{width:100%;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;border:0;background:#020b18;color:var(--muted);font-size:12px;padding:0;overflow:hidden}
+#view-cameras .cam-thumb img{width:100%;height:100%;object-fit:cover}
+#view-cameras .cam-snapshot-info{padding:10px;overflow-wrap:anywhere}
+#view-cameras .cam-snapshot-info small{display:block;font-size:11px;line-height:1.5}
+#view-cameras .cam-snapshot .actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin-top:10px}
+#view-cameras .cam-snapshot .btn{font-size:11px;padding:8px 5px}
+#view-cameras .cam-flag{font-size:11px;color:var(--orange);margin-top:6px}
+#view-cameras .cam-storage{overflow-wrap:anywhere}
+#view-cameras .cam-history{max-height:620px;overflow:auto}
+#view-cameras .cam-history .cam-card{font-size:12px;line-height:1.6}
+#view-cameras .cam-credential-note{font-size:12px;color:var(--muted);line-height:1.6;margin:0 0 14px}
+#view-cameras .cam-empty{grid-column:1/-1}
+@media(min-width:700px){#view-cameras .cam-layout{grid-template-columns:minmax(290px,.9fr) minmax(0,1.1fr)}#view-cameras .cam-gallery{grid-template-columns:repeat(3,minmax(0,1fr))}#view-cameras .cam-tabs{max-width:680px}#view-cameras .cam-gallery-toolbar{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:center}}
+@media(min-width:1100px){#view-cameras .cam-gallery{grid-template-columns:repeat(4,minmax(0,1fr))}#view-cameras .cam-layout{grid-template-columns:minmax(340px,.85fr) minmax(0,1.15fr)}}
+@media(orientation:landscape) and (min-width:580px) and (max-height:600px){#view-cameras .cam-layout{grid-template-columns:minmax(260px,1fr) minmax(0,1fr)}#view-cameras .cam-gallery{grid-template-columns:repeat(3,minmax(0,1fr))}#view-cameras .cam-channels{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:360px){#view-cameras .cam-gallery{grid-template-columns:minmax(0,1fr)}#view-cameras .cam-channels{grid-template-columns:repeat(3,minmax(0,1fr))}}
