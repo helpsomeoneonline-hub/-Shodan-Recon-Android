@@ -37,6 +37,10 @@ final class CameraBatchStore {
     }
 
     synchronized JSONObject start(int total) throws Exception {
+        return start(total, "assigned");
+    }
+
+    synchronized JSONObject start(int total, String credentialMode) throws Exception {
         JSONObject source = data();
         JSONObject previous = source.optJSONObject("current");
         if (previous != null && previous.optBoolean("running")) throw new Exception("A camera batch is already running.");
@@ -45,7 +49,7 @@ final class CameraBatchStore {
             if (old != null) for (int i = 0; i < Math.min(old.length(), RETAINED_RUNS - 1); i++) history.put(old.get(i));
             source.put("history", history);
         }
-        JSONObject current = CameraBatchReport.start(total);
+        JSONObject current = CameraBatchReport.start(total, credentialMode);
         source.put("current", current); persist(source); return current;
     }
 
@@ -71,3 +75,4 @@ final class CameraBatchStore {
         return CameraBatchReport.csv(batches);
     }
 }
+

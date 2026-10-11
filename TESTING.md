@@ -4,6 +4,15 @@ The GitHub Actions run and `ShodanRecon-verification` artifact record dashboard
 checks, JVM tests, Android lint and debug APK assembly. Tests use local HTTP
 fixtures, never public cameras. Compilation alone does not establish compatibility.
 
+## 1.4.0 verification status
+
+Version 1.4.0 is versionCode 6. The new automatic saved-password backend has not
+been executed or tested, and no real camera password attempts were performed.
+The user requested implementation without running tests. Earlier UI checks ran
+before that instruction; no further tests, Android build or emulator checks were
+run afterward. The feature commit uses `[skip ci]` to skip automated workflows.
+Added test source is available for a future explicitly requested verification.
+
 ## 1.3.0 verification
 
 Version 1.3.0 is versionCode 5; package and development signing certificate remain
@@ -93,4 +102,5 @@ workspace. Physical testing is required for:
 Compatibility limits: obsolete browser plugins, unsupported codecs, cross-origin
 HLS resources, Digest auth-int/userhash and untrusted TLS certificates require a
 supported endpoint or device configuration change. No Node/FFmpeg proxy,
-credential guessing or discovery-triggered device authentication is implemented.
+arbitrary password lists or discovery-triggered device authentication is implemented.
+

@@ -41,6 +41,44 @@ public class CameraBatchStoreTest {
         assertFalse(restored.has("currentResult"));
     }
 
+    @Test public void savedPasswordAttemptProgressAndWorkingPresetSurviveInterruptionAndExport() throws Exception {
+        JSONObject current = store.start(2, "saved-passwords");
+        JSONArray attempts = new JSONArray()
+                .put(new JSONObject().put("credentialId", "preset-1").put("status", "authentication-failed").put("httpCode", 401))
+                .put(new JSONObject().put("credentialId", "preset-2").put("status", "success").put("httpCode", 200));
+        current.put("currentResult", row(current.getString("runId")).put("credentialMode", "saved-passwords")
+                .put("credentialAttempts", 2).put("workingCredentialId", "preset-2").put("attemptResults", attempts));
+        CameraBatchReport.totals(current);
+        assertTrue(store.update(current));
+        CameraBatchStore reconstructed = new CameraBatchStore(memory.preferences);
+        reconstructed.interrupt();
+        JSONObject restored = reconstructed.state();
+        JSONObject saved = restored.getJSONArray("results").getJSONObject(0);
+        assertEquals("saved-passwords", restored.getString("credentialMode"));
+        assertEquals(2, restored.getInt("credentialAttempts"));
+        assertEquals(2, saved.getInt("credentialAttempts"));
+        assertEquals("preset-2", saved.getString("workingCredentialId"));
+        assertEquals(attempts.toString(), saved.getJSONArray("attemptResults").toString());
+        assertTrue(reconstructed.csv().contains(",\"saved-passwords\",\"2\",\"preset-2\"\r\n"));
+    }
+
+    @Test public void legacyStoredReportExportsAndMovesIntoHistoryWithoutAttemptMetadata() throws Exception {
+        JSONObject legacy = CameraBatchReport.start(1);
+        legacy.remove("credentialMode"); legacy.remove("credentialAttempts");
+        JSONObject finished = row(legacy.getString("runId"));
+        finished.remove("credentialMode"); finished.remove("credentialAttempts");
+        finished.remove("workingCredentialId"); finished.remove("attemptResults");
+        CameraBatchReport.finishRow(finished, "success", "HTTP 200");
+        legacy.getJSONArray("results").put(finished);
+        CameraBatchReport.finish(legacy, "completed");
+        legacy.remove("credentialAttempts");
+        memory.values.put("batches", new JSONObject().put("current", legacy).put("history", new JSONArray()).toString());
+        assertTrue(store.csv().endsWith(",\"assigned\",\"\",\"\"\r\n"));
+        store.start(1, "saved-passwords");
+        assertEquals(legacy.getString("runId"), store.history().getJSONObject(0).getString("runId"));
+        assertTrue(store.csv().contains(legacy.getString("runId")));
+    }
+
     @Test public void terminalReportsCannotBeOverwrittenByOldWorkerProgressOrAnotherRun() throws Exception {
         JSONObject old = store.start(1);
         store.interrupt();
@@ -108,3 +146,4 @@ public class CameraBatchStoreTest {
         }
     }
 }
+

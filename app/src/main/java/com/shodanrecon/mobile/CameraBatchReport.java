@@ -36,23 +36,37 @@ final class CameraBatchReport {
         return new JSONObject().put("running", false).put("status", "idle").put("runId", "")
                 .put("currentCamera", JSONObject.NULL).put("index", 0).put("total", 0)
                 .put("completed", 0).put("successes", 0).put("failures", 0)
+                .put("credentialMode", "assigned").put("credentialAttempts", 0)
                 .put("snapshotsSaved", 0).put("snapshotsFlagged", 0).put("snapshotFailures", 0)
                 .put("results", new JSONArray()).put("message", "Select registered cameras and press Start.")
                 .put("summary", "").put("startedAt", "").put("finishedAt", "");
     }
 
     static JSONObject start(int total) throws Exception {
+        return start(total, "assigned");
+    }
+
+    static JSONObject start(int total, String credentialMode) throws Exception {
         if (total < 1 || total > 500) throw new Exception("Select 1–500 registered cameras.");
+        requireCredentialMode(credentialMode);
         return empty().put("running", true).put("status", "running").put("total", total)
+                .put("credentialMode", credentialMode)
                 .put("runId", UUID.randomUUID().toString()).put("startedAt", Instant.now().toString())
                 .put("message", "Starting camera checks…");
     }
 
     static JSONObject begin(JSONObject camera, String runId) throws Exception {
+        return begin(camera, runId, "assigned");
+    }
+
+    static JSONObject begin(JSONObject camera, String runId, String credentialMode) throws Exception {
+        requireCredentialMode(credentialMode);
         return new JSONObject().put("runId", runId).put("cameraId", camera.getString("id"))
                 .put("cameraName", camera.optString("name", camera.optString("host")))
                 .put("host", camera.optString("host")).put("scheme", camera.optString("scheme"))
                 .put("port", camera.optInt("port")).put("credentialId", camera.optString("credentialId"))
+                .put("credentialMode", credentialMode).put("credentialAttempts", 0)
+                .put("workingCredentialId", "").put("attemptResults", new JSONArray())
                 .put("startedAt", Instant.now().toString()).put("startedTimestamp", System.currentTimeMillis())
                 .put("finishedAt", "").put("elapsedMs", 0).put("status", "pending")
                 .put("connectionStatus", "pending").put("httpCode", 0).put("message", "Testing HTTP interface…")
@@ -60,10 +74,18 @@ final class CameraBatchReport {
                 .put("snapshotResults", new JSONArray());
     }
 
+    private static void requireCredentialMode(String credentialMode) throws Exception {
+        if (!"assigned".equals(credentialMode) && !"saved-passwords".equals(credentialMode))
+            throw new Exception("Select assigned credentials or saved passwords.");
+    }
+
     /** Classification includes sanitized transport messages, whose original exception type may be hidden. */
     static String failureStatus(Throwable error, int code, boolean cancelled) {
         if (cancelled) return "cancelled";
-        if (code == 401 || code == 403) return "authentication-failed";
+        if (code == 401) return "authentication-failed";
+        if (code == 403) return "forbidden";
+        if (code == 423) return "locked";
+        if (code == 429) return "rate-limited";
         if (code >= 300) return "http-error";
         String message = error == null || error.getMessage() == null ? "" : error.getMessage().toLowerCase(Locale.ROOT);
         if (error instanceof java.net.SocketTimeoutException || message.contains("timed out") || message.contains("timeout")) return "timeout";
@@ -79,9 +101,9 @@ final class CameraBatchReport {
                 .put("elapsedMs", Math.max(0, System.currentTimeMillis() - row.optLong("startedTimestamp")));
     }
 
-    /** Recompute from finalized rows: one HTTP check per camera, independent snapshot counters. */
+    /** Recompute from finalized rows: one camera outcome, separate credential and snapshot counters. */
     static void totals(JSONObject batch) throws Exception {
-        int completed = 0, successes = 0, failures = 0, saved = 0, flagged = 0, snapshotFailures = 0;
+        int completed = 0, successes = 0, failures = 0, saved = 0, flagged = 0, snapshotFailures = 0, credentialAttempts = 0;
         JSONArray rows = batch.optJSONArray("results");
         if (rows != null) for (int i = 0; i < rows.length(); i++) {
             JSONObject row = rows.getJSONObject(i);
@@ -93,15 +115,18 @@ final class CameraBatchReport {
             saved += row.optInt("snapshotsSaved");
             flagged += row.optInt("snapshotsFlagged");
             snapshotFailures += row.optInt("snapshotFailures");
+            credentialAttempts += row.optInt("credentialAttempts");
         }
         JSONObject current = batch.optJSONObject("currentResult");
         if (current != null) {
             saved += current.optInt("snapshotsSaved");
             flagged += current.optInt("snapshotsFlagged");
             snapshotFailures += current.optInt("snapshotFailures");
+            credentialAttempts += current.optInt("credentialAttempts");
         }
         batch.put("completed", completed).put("successes", successes).put("failures", failures)
-                .put("snapshotsSaved", saved).put("snapshotsFlagged", flagged).put("snapshotFailures", snapshotFailures);
+                .put("snapshotsSaved", saved).put("snapshotsFlagged", flagged).put("snapshotFailures", snapshotFailures)
+                .put("credentialAttempts", credentialAttempts);
     }
 
     static void finish(JSONObject batch, String status) throws Exception {
@@ -124,8 +149,8 @@ final class CameraBatchReport {
     }
 
     static String csv(JSONArray batches) throws Exception {
-        StringBuilder out = new StringBuilder("run_id,camera_id,camera_name,address,scheme,port,credential_id,started_at,finished_at,elapsed_ms,status,connection_status,http_code,snapshots_saved,snapshots_flagged,snapshot_failures,message\r\n");
-        String[] fields = {"runId", "cameraId", "cameraName", "host", "scheme", "port", "credentialId", "startedAt", "finishedAt", "elapsedMs", "status", "connectionStatus", "httpCode", "snapshotsSaved", "snapshotsFlagged", "snapshotFailures", "message"};
+        StringBuilder out = new StringBuilder("run_id,camera_id,camera_name,address,scheme,port,credential_id,started_at,finished_at,elapsed_ms,status,connection_status,http_code,snapshots_saved,snapshots_flagged,snapshot_failures,message,credential_mode,credential_attempts,working_credential_id\r\n");
+        String[] fields = {"runId", "cameraId", "cameraName", "host", "scheme", "port", "credentialId", "startedAt", "finishedAt", "elapsedMs", "status", "connectionStatus", "httpCode", "snapshotsSaved", "snapshotsFlagged", "snapshotFailures", "message", "credentialMode", "credentialAttempts", "workingCredentialId"};
         for (int i = 0; i < batches.length(); i++) {
             JSONArray rows = batches.getJSONObject(i).optJSONArray("results");
             if (rows == null) continue;
@@ -134,7 +159,8 @@ final class CameraBatchReport {
                 if (row.optString("finishedAt").isEmpty()) continue;
                 for (int f = 0; f < fields.length; f++) {
                     if (f > 0) out.append(',');
-                    out.append(cell(row.optString(fields[f], "")));
+                    // Existing reports predate attempt metadata; preserve an unknown count as blank.
+                    out.append(cell(row.optString(fields[f], fields[f].equals("credentialMode") ? "assigned" : "")));
                 }
                 out.append("\r\n");
             }
@@ -150,3 +176,4 @@ final class CameraBatchReport {
         return '"' + value.replace("\"", "\"\"") + '"';
     }
 }
+

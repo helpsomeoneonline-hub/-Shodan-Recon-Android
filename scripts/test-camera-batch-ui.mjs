@@ -7,7 +7,7 @@ const cameras = [
   {id:'back',name:'Back',host:'192.168.1.12',port:443,scheme:'https',authorized:true,credentialId:'preset-2',channels:[201],httpPath:'/',snapshotPath:'/snapshot/{channel}',rtspPort:554}
 ];
 const credentials = [{id:'preset-1',name:'Password preset 1',hasPassword:true},{id:'preset-2',name:'Password preset 2',hasPassword:true}];
-const initial = {cameras,credentials,passwordPresets:[],history:[],snapshots:[],busy:false,batch:{}};
+const initial = {cameras,credentials,passwordPresets:credentials.map(credential=>({...credential,configured:true})),sharedUsername:'operator',usernameConfigured:true,usernameUnavailable:false,history:[],snapshots:[],busy:false,batch:{}};
 let passed = 0;
 function test(name, work) { work(); passed++; console.log('PASS ' + name); }
 
@@ -27,15 +27,55 @@ test('individual and bulk selections include only authorized registered cameras'
   assert.equal(app.element('cam-batch-start').disabled, true);
 });
 
-test('Start sends one camera-ID batch and locks repeated Start/manual capture', () => {
+test('Start defaults to saved-password testing and locks repeated Start/manual capture', () => {
   const app = cameraDashboard(initial);
+  assert.equal(app.element('cam-batch-credential-mode').value, 'saved-passwords');
+  assert.match(app.element('cam-batch-setup-status').textContent, /2 of 6 password presets ready/);
   app.click('cam-batch-select-all'); app.click('cam-batch-start'); app.click('cam-batch-start');
   assert.equal(app.callsTo('batch-start').length, 1);
-  assert.deepEqual(app.callsTo('batch-start')[0].data, {cameraIds:['front','back']});
+  assert.deepEqual(app.callsTo('batch-start')[0].data, {cameraIds:['front','back'],credentialMode:'saved-passwords'});
   assert.equal(app.element('cam-capture').disabled, true);
   assert.equal(app.element('cam-batch-select-all').disabled, true);
+  assert.equal(app.element('cam-batch-credential-mode').disabled, true);
   assert.equal(app.element('cam-batch-stop').disabled, false);
   assert.equal(app.element('cam-batch-completed').textContent, '0 / 2');
+});
+
+test('saved-password mode works for cameras without individual credential assignments', () => {
+  const app = cameraDashboard({...initial,cameras:cameras.map(camera=>({...camera,credentialId:''}))});
+  app.click('cam-batch-select-all'); app.click('cam-batch-start');
+  assert.deepEqual(app.callsTo('batch-start')[0].data, {cameraIds:['front','back'],credentialMode:'saved-passwords'});
+  assert.match(app.element('cam-batch-mode-help').textContent, /No per-camera credential assignment is required/);
+});
+
+test('saved-password mode requires a saved username and an available preset; legacy credentials do not count', () => {
+  const app = cameraDashboard({...initial,sharedUsername:'',usernameConfigured:false});
+  app.click('cam-batch-select-all'); app.click('cam-batch-start');
+  assert.equal(app.element('cam-batch-start').disabled, true);
+  assert.equal(app.callsTo('batch-start').length, 0);
+  assert.match(app.element('cam-batch-setup-status').textContent, /shared username/);
+  app.reply('camera-state', {...initial,passwordPresets:[],credentials:[{id:'legacy',hasPassword:true}]});
+  assert.equal(app.element('cam-batch-start').disabled, true);
+  assert.match(app.element('cam-batch-setup-status').textContent, /at least one password preset/);
+  app.reply('camera-state', {...initial,passwordPresets:[...initial.passwordPresets,{id:'preset-3',configured:false,unavailable:true}]});
+  assert.equal(app.element('cam-batch-start').disabled, true);
+  assert.match(app.element('cam-batch-setup-status').textContent, /Replace or delete unavailable password preset 3/);
+  app.click('cam-batch-start');
+  assert.equal(app.callsTo('batch-start').length, 0);
+  app.reply('camera-state', {...initial,usernameUnavailable:true});
+  assert.equal(app.element('cam-batch-start').disabled, true);
+  app.reply('camera-state', initial);
+  assert.equal(app.element('cam-batch-start').disabled, false);
+});
+
+test('assigned-credential mode remains available without shared setup and sends an explicit mode', () => {
+  const app = cameraDashboard({...initial,sharedUsername:'',usernameConfigured:false,credentials:[],passwordPresets:[]});
+  app.change('cam-batch-credential-mode', 'assigned'); app.click('cam-batch-select-all');
+  assert.equal(app.element('cam-batch-start').disabled, false);
+  assert.equal(app.storedSession.get('camera-batch-credential-mode'), 'assigned');
+  app.click('cam-batch-start');
+  assert.deepEqual(app.callsTo('batch-start')[0].data, {cameraIds:['front','back'],credentialMode:'assigned'});
+  assert.match(app.element('cam-batch-mode-help').textContent, /assigned saved credential/);
 });
 
 test('native sequential progress updates current camera and independent counters', () => {
@@ -52,6 +92,19 @@ test('native sequential progress updates current camera and independent counters
   assert.equal(app.element('cam-batch-stop').disabled, true);
 });
 
+test('native password-attempt progress shows candidate order and clears before snapshots or completion', () => {
+  const app = cameraDashboard(initial);
+  app.reply('batch-progress', {running:true,credentialMode:'saved-passwords',currentCamera:cameras[0],currentCredential:{index:2,total:6,id:'preset-4'},message:'Trying password preset 4'});
+  assert.equal(app.element('cam-batch-credential').textContent, 'Password attempt 2 of 6 · Password preset 4');
+  assert.equal(app.element('cam-batch-stage').textContent, 'Trying password preset 4');
+  app.reply('batch-progress', {running:true,currentCredential:null,message:'Capturing snapshot channel 101'});
+  assert.equal(app.element('cam-batch-credential').textContent, '');
+  assert.equal(app.element('cam-batch-stage').textContent, 'Capturing snapshot channel 101');
+  app.reply('batch-progress', {running:false,currentCredential:{index:2,total:6,id:'preset-4'},message:'Complete'});
+  assert.equal(app.element('cam-batch-credential').textContent, '');
+  assert.equal(app.element('cam-batch-stage').textContent, '');
+});
+
 test('completed and prior runs remain reviewable and CSV export uses native picker', () => {
   const result = {cameraId:'front',cameraName:'Front',host:'192.168.1.10',connectionStatus:'success',status:'success',httpCode:200,message:'Connected',finishedAt:'2026-10-11T10:00:00Z',snapshotsSaved:1};
   const batch = {running:false,status:'complete',runId:'latest',total:2,completed:2,successes:1,failures:1,snapshotsSaved:1,summary:'Finished two checks',results:[result,{...result,cameraId:'back',cameraName:'Back',connectionStatus:'authentication-failed',httpCode:401}]};
@@ -63,6 +116,16 @@ test('completed and prior runs remain reviewable and CSV export uses native pick
   assert.deepEqual(app.callsTo('batch-export')[0].data, {});
   app.reply('batch-progress', {running:false,status:'cancelled',total:2,completed:1,successes:1,failures:0,snapshotsSaved:1,currentCamera:null,summary:''});
   assert.match(app.element('cam-batch-summary').textContent, /Stopped: 1 of 2/);
+});
+
+test('saved-password results show working preset and attempt count without claiming a preset for open interfaces', () => {
+  const result = {cameraId:'front',cameraName:'Front',host:'192.168.1.10',connectionStatus:'success',credentialMode:'saved-passwords',credentialAttempts:2,workingCredentialId:'preset-2',snapshotsSaved:1};
+  const app = cameraDashboard({...initial,batch:{running:false,results:[result,{...result,cameraId:'back',workingCredentialId:'',credentialAttempts:1,message:'Authentication was not required by the interface.'}]}});
+  const rows = app.element('cam-batch-results').children;
+  assert.match(rows[1].innerHTML, /2 password attempt\(s\) · Working credential: Password preset 2/);
+  assert.match(rows[0].innerHTML, /1 password attempt\(s\)/);
+  assert.doesNotMatch(rows[0].innerHTML, /Working credential/);
+  assert.match(rows[0].innerHTML, /Authentication was not required/);
 });
 
 test('batch check diagnostic events do not trigger refreshes or toasts', () => {
@@ -119,3 +182,4 @@ test('custom snapshot channels can be persisted on the selected camera for futur
 });
 
 console.log(passed + ' camera batch/gallery behavior tests passed.');
+

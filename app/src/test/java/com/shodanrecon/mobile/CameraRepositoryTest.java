@@ -174,6 +174,41 @@ public class CameraRepositoryTest {
         assertEquals(1, repository.camera("channel-camera").getJSONArray("channels").length());
     }
 
+    @Test public void automaticCandidatesUseOnlyConfiguredPresetsInOrderWithSharedUsername() throws Exception {
+        repository.saveCredential(new JSONObject().put("id", "legacy").put("username", "legacy-user").put("password", "legacy-secret"));
+        save("operator", update("preset-6", "last-device-secret"), update("preset-2", "second-device-secret"));
+        java.util.List<JSONObject> candidates = repository.savedPasswordCredentials();
+        assertEquals(2, candidates.size());
+        assertEquals("preset-2", candidates.get(0).getString("id"));
+        assertEquals("preset-6", candidates.get(1).getString("id"));
+        assertEquals("operator", candidates.get(0).getString("username"));
+        assertEquals("operator", candidates.get(1).getString("username"));
+        candidates.get(0).put("password", "modified-in-memory");
+        assertEquals("second-device-secret", repository.credential("preset-2").getString("password"));
+    }
+
+    @Test public void automaticCandidatesRequireReadableUsernameAndPresets() throws Exception {
+        assertThrows(Exception.class, () -> repository.savedPasswordCredentials());
+        save("operator");
+        assertThrows(Exception.class, () -> repository.savedPasswordCredentials());
+        save("", update("preset-1", "first-device-secret"));
+        JSONObject saved = new JSONObject(memory.values.get("devices"));
+        saved.getJSONObject("credentials").put("preset-1", "unavailable-key-ciphertext");
+        memory.values.put("devices", saved.toString());
+        assertThrows(Exception.class, () -> repository.savedPasswordCredentials());
+    }
+
+    @Test public void verifiedPresetAssignmentPreservesCameraAndOtherAssignments() throws Exception {
+        save("operator", update("preset-1", "first-device-secret"), update("preset-2", "second-device-secret"));
+        repository.saveCamera(camera("first-camera", "preset-1").put("snapshotPath", "/custom/{channel}"));
+        repository.saveCamera(camera("second-camera", "preset-1"));
+        repository.assignVerifiedCredential("first-camera", "preset-2");
+        assertEquals("preset-2", repository.camera("first-camera").getString("credentialId"));
+        assertEquals("/custom/{channel}", repository.camera("first-camera").getString("snapshotPath"));
+        assertEquals("preset-1", repository.camera("second-camera").getString("credentialId"));
+        assertThrows(Exception.class, () -> repository.assignVerifiedCredential("unknown-camera", "preset-2"));
+    }
+
     private static final class TestCodec implements CameraRepository.CredentialCodec {
         final Map<String, String> secrets = new HashMap<>();
         boolean failEncryption;
@@ -215,3 +250,4 @@ public class CameraRepositoryTest {
         }
     }
 }
+

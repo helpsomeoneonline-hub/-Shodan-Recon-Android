@@ -1,8 +1,11 @@
-# Shodan Recon Android 1.3.0
+# Shodan Recon Android 1.4.0
 
 Standalone Android 8+ app extending the existing Java/WebView project. Package
 `com.shodanrecon.mobile`, existing `recon_local_v1` search data and Shodan
 Keystore alias are preserved. No Node.js server is required.
+
+Version 1.4.0 is a source update. Its automatic saved-password feature has not
+been executed or verified; tests and CI are skipped at the user's request.
 
 ## Discovery
 
@@ -21,7 +24,8 @@ Keystore alias are preserved. No Node.js server is required.
 ## Authorized cameras
 
 Register cameras in **Cameras**, confirm administration permission, save the host,
-HTTP(S)/RTSP ports and endpoint templates, then assign one saved password preset.
+HTTP(S)/RTSP ports and endpoint templates. Assign a saved password preset for
+manual viewing, or use automatic saved-password testing in the manager.
 Discovery results never initiate camera authentication.
 
 - One shared username and exactly six password presets in **Settings**, encrypted
@@ -36,7 +40,8 @@ Discovery results never initiate camera authentication.
   camera's configured origin; HTTP/HTTPS ports remain configurable.
 - Rotation retention; network/playback stops when the viewer enters the background.
 - HTTP Basic and Digest (MD5/SHA-256/session variants, qop auth or legacy no-qop),
-  bounded authentication retries. No guessing or dictionary attacks.
+  bounded authentication retries. Automatic password checks use only your six
+  saved preset slots and registered cameras you select.
 - HTTPS verifies certificate chains and hostnames, trusting system CAs and
   CAs explicitly installed by the user in Android certificate settings. HTTP/HLS requests remain on the configured
   origin; redirects and cross-origin resources are blocked. Save the actual
@@ -53,20 +58,30 @@ launches without saved passwords; enter credentials in the external player.
 
 ## Automatic camera manager
 
-1. Register the cameras you administer, configure their interface/snapshot paths
-   and channels, and assign each camera a configured preset.
-2. Open **Cameras → Automatic Manager**, select cameras and press **Start**.
-3. The app checks each camera's HTTP(S) interface sequentially using only its
-   assigned credential, then captures its configured snapshot channels.
-4. Review current-camera progress, completed checks, connection successes,
-   failures and saved snapshots. **Stop** cancels the active request and prevents
-   remaining cameras from starting.
-5. Review saved results or export the camera-check CSV; use **Gallery** to view
+1. Search Shodan, identify addresses belonging to you, and use **Register camera**
+   on a result or saved IP. Confirm administration permission and configure that
+   camera's snapshot path and channels.
+2. Save one shared username and your passwords in the six preset slots in
+   **Settings**. Existing encrypted presets remain available after updating.
+3. Open **Cameras → Automatic Camera Manager**, select your registered cameras,
+   choose **Test saved passwords automatically** and press **Start**.
+4. For each camera, the app checks its first configured snapshot channel with
+   presets 1 through 6 in order, skipping empty slots. A definite authentication
+   rejection advances to the next password. The first successful credential is
+   reused for snapshot channels and remembered in that camera's profile. The app
+   saves the result, then automatically advances to the next selected camera.
+5. Review camera/password progress, the working preset, completed checks and saved
+   snapshots. **Stop** cancels the active request and prevents remaining cameras
+   from starting.
+6. Review saved results or export the camera-check CSV; use **Gallery** to view
    snapshots and **Settings → Diagnostic log** to export diagnostics.
 
-Failed checks do not stop later cameras. Authentication errors do not cause
-other presets to be tried. Completed and interrupted reports remain available
-after reopening the app. The automatic interface check does not establish RTSP,
+Failed checks do not stop later cameras. Forbidden access, account locks, rate
+limits, network/TLS errors and configuration failures stop password attempts for
+that camera. An endpoint accessible without authentication is reported without
+claiming a password was verified. **Use each camera's assigned credential** keeps
+the existing single-credential interface check. Completed and interrupted reports
+remain available after reopening the app. These checks do not establish RTSP,
 MJPEG or HLS playback compatibility; use the existing viewer for those methods.
 
 ## Snapshots
@@ -105,7 +120,7 @@ before updating: earlier Actions used ephemeral signing keys, so an in-place
 update may be impossible without the original private key. Export data before
 any uninstall. The committed development key is not a production release key.
 
-Version 1.3.0 uses versionCode 5 and retains `com.shodanrecon.mobile`, the existing
+Version 1.4.0 uses versionCode 6 and retains `com.shodanrecon.mobile`, the existing
 signing configuration, preference names and storage paths. A matching signed
 installation updates in place; do not uninstall to update. The PR workflow installs
 the previous base APK, saves synthetic settings/IPs/camera/Keystore credentials,
@@ -114,3 +129,4 @@ then installs this APK with `adb install -r` and checks retained data.
 The repository `SHODAN_API_KEY` secret is never read by the APK build or embedded
 in the app. A separate account-check workflow uses it only for sanitized API verification. Enter your key in Settings; it is encrypted on your device.
 See [TESTING.md](TESTING.md) for physical-device checks and compatibility limits.
+

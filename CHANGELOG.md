@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.4.0 — versionCode 6
+
+- Add automatic saved-password testing for selected registered cameras: one
+  shared username, configured presets 1–6 in order, and stop at the first
+  successful authentication or after all configured passwords are rejected.
+- Capture configured snapshot channels using the successful credential, remember
+  its camera assignment, save each result and automatically continue to the next
+  selected camera. Preserve the assigned-credential mode.
+- Display password progress and working preset; retain attempt counts and
+  non-sensitive outcomes in persistent reports and CSV exports.
+- Stop attempts for the current camera on access restrictions, lockouts, rate
+  limits, transport errors or invalid configuration. Preserve cancellation and
+  existing encrypted credentials, camera profiles, reports and images.
+- Source changes only: feature testing and automated CI are intentionally skipped
+  at the user's request. No real camera password attempts were performed.
+
 ## 1.3.0 — versionCode 5
 
 - Add sequential Automatic Camera Manager with multi-selection, Start/Stop,
@@ -44,3 +60,4 @@
 - Add authentication, URL, stream-parser and dashboard regression tests.
 - Request displayed Shodan metadata explicitly to avoid oversized service banners.
 - Run tests/lint/APK build in Actions and stabilize future development signing.
+
