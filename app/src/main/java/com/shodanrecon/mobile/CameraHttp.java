@@ -42,6 +42,15 @@ public final class CameraHttp {
         StatusException(int statusCode, String message) { super(message); this.statusCode = statusCode; }
     }
 
+    /** Distinguishes a failed network body read from image validation or local storage failures. */
+    static final class BodyReadException extends IOException {
+        BodyReadException(IOException cause) {
+            super(cause instanceof SocketTimeoutException ? "Camera snapshot download timed out. Check the network and camera availability."
+                    : cause instanceof SSLException ? "HTTPS certificate verification failed during the camera download."
+                    : "Camera snapshot download failed. Check the network and camera availability.");
+        }
+    }
+
     private final JSONObject camera;
     private final HttpUrl origin;
     private final String username;
@@ -70,6 +79,7 @@ public final class CameraHttp {
                 .authenticator((route, response) -> {
                     if (cancelled.get() || !CameraUrls.sameOrigin(origin, response.request().url())) return null;
                     if (username.isEmpty() && password.isEmpty()) return null;
+                    if (response.header("Retry-After") != null) return null;
                     int attempts = responseCount(response);
                     if (attempts >= 3) return null;
                     Challenge challenge = preferredChallenge(response.headers("WWW-Authenticate"));
@@ -151,6 +161,14 @@ public final class CameraHttp {
         for (Call call : active) call.cancel();
     }
 
+    /** A challenge or stale nonce alone does not prove that a supplied password was rejected. */
+    static boolean authenticationRejected(Response response) {
+        if (response.code() != 401 || response.request().header("Authorization") == null
+                || response.header("Retry-After") != null) return false;
+        Challenge challenge = preferredChallenge(response.headers("WWW-Authenticate"));
+        return challenge != null && !"true".equalsIgnoreCase(challenge.parameters.get("stale"));
+    }
+
     /** Clones retain origin validation, challenge authentication and cancellation tracking. */
     public OkHttpClient client() { return client; }
 
@@ -162,7 +180,7 @@ public final class CameraHttp {
                         long count = super.read(sink, byteCount);
                         if (count == -1) active.remove(call);
                         return count;
-                    } catch (IOException ex) { active.remove(call); throw ex; }
+                    } catch (IOException ex) { active.remove(call); throw new BodyReadException(ex); }
                 }
                 @Override public void close() throws IOException {
                     try { super.close(); } finally { active.remove(call); }
@@ -342,3 +360,4 @@ public final class CameraHttp {
         return result.toString();
     }
 }
+

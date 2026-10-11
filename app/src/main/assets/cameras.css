@@ -54,6 +54,8 @@
 :is(#view-cameras,#view-gallery) .cam-batch-metrics strong{display:block;font:700 19px monospace;color:var(--cyan)}
 :is(#view-cameras,#view-gallery) .cam-batch-metrics span{display:block;font-size:11px;color:var(--muted);margin-top:4px}
 :is(#view-cameras,#view-gallery) .cam-batch-result strong{font-size:12px;color:var(--cyan)}
+:is(#view-cameras,#view-gallery) .cam-batch-credential,:is(#view-cameras,#view-gallery) .cam-batch-credential-result{color:var(--cyan);font-size:12px;line-height:1.6}
+:is(#view-cameras,#view-gallery) .cam-batch-live p:empty{display:none}
 :is(#view-cameras,#view-gallery) .cam-channel-add{align-self:start;margin-top:23px}
 #cam-preset-section{scroll-margin-top:90px}
 #cam-preset-section input,#cam-preset-section .btn{min-height:48px}
@@ -63,3 +65,4 @@
 :is(#view-cameras,#view-gallery) button:focus-visible,#cam-preset-section button:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
 @media(min-width:1000px){:is(#view-cameras,#view-gallery) .cam-batch-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:420px){#cam-preset-section .cam-preset-grid{grid-template-columns:minmax(0,1fr)}}
+

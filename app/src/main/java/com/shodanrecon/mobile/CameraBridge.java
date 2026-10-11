@@ -230,15 +230,21 @@ public final class CameraBridge {
 
     private void batch(JSONObject args) throws Exception {
         java.util.List<JSONObject> selected = batchSelection(args);
+        String credentialMode = args.optString("credentialMode", "assigned");
+        if (!credentialMode.equals("assigned") && !credentialMode.equals("saved-passwords"))
+            throw new Exception("Choose assigned credentials or automatic saved-password testing.");
+        boolean savedPasswords = credentialMode.equals("saved-passwords");
+        java.util.List<JSONObject> candidates = savedPasswords ? repository.savedPasswordCredentials() : null;
         if (cancelled.get() || closed.get()) throw new Exception("Camera task cancelled.");
-        JSONObject batch = batches.start(selected.size());
+        JSONObject batch = batches.start(selected.size(), credentialMode);
         String endStatus = "completed";
         try {
             batchProgress(batch);
             for (int index = 0; index < selected.size(); index++) {
                 if (cancelled.get() || closed.get()) { endStatus = "cancelled"; break; }
                 JSONObject camera = selected.get(index);
-                JSONObject row = CameraBatchReport.begin(camera, batch.getString("runId"));
+                JSONObject row = CameraBatchReport.begin(camera, batch.getString("runId"), credentialMode);
+                if (savedPasswords) row.put("credentialId", "");
                 row.put("cameraName", repository.sanitize(row.optString("cameraName")));
                 batch.put("currentCamera", new JSONObject().put("id", camera.getString("id"))
                                 .put("name", repository.sanitize(camera.optString("name"))).put("host", camera.optString("host"))
@@ -250,20 +256,62 @@ public final class CameraBridge {
                 int responseCode = 0;
                 boolean connected = false;
                 try {
-                    activeHttp = new CameraHttp(repository, camera);
-                    if (cancelled.get() || closed.get()) { activeHttp.cancel(); throw new Exception("Camera task cancelled."); }
                     int firstChannel = camera.getJSONArray("channels").optInt(0, 101);
-                    try (Response response = activeHttp.get(CameraUrls.url(camera, path(camera, "http"), firstChannel))) {
-                        responseCode = response.code(); row.put("httpCode", responseCode);
-                        checkHttp(response);
-                        if (response.body().byteStream().read() == -1) throw new Exception("The camera returned an empty HTTP interface response. Check its configured path.");
+                    if (savedPasswords) {
+                        // Test the snapshot endpoint: many camera landing pages never challenge credentials.
+                        String probeUrl = CameraUrls.url(camera, path(camera, "snapshot"), firstChannel);
+                        CameraCredentialCheck.Result result = CameraCredentialCheck.connect(camera, probeUrl, candidates,
+                                () -> cancelled.get() || closed.get(), new CameraCredentialCheck.Listener() {
+                                    @Override public void starting(String id, int index, int total) throws Exception {
+                                        row.put("credentialAttempts", row.optInt("credentialAttempts") + 1);
+                                        batch.put("currentCredential", new JSONObject().put("id", id).put("index", index).put("total", total))
+                                                .put("message", "Camera " + batch.optInt("index") + "/" + batch.optInt("total")
+                                                        + ": testing password preset " + id.substring(7) + " (" + index + "/" + total + ")…");
+                                        batchProgress(batch);
+                                    }
+                                    @Override public void active(CameraHttp transport) throws Exception {
+                                        activeHttp = transport;
+                                        if (cancelled.get() || closed.get()) { transport.cancel(); throw new Exception("Camera task cancelled."); }
+                                    }
+                                    @Override public void finished(String id, String status, int httpCode) throws Exception {
+                                        row.getJSONArray("attemptResults").put(new JSONObject().put("credentialId", id)
+                                                .put("status", status).put("httpCode", httpCode));
+                                        row.put("httpCode", httpCode);
+                                        CameraBatchReport.totals(batch); batchProgress(batch);
+                                    }
+                                });
+                        activeHttp = result.transport;
+                        responseCode = result.httpCode;
+                        row.put("workingCredentialId", result.workingCredentialId).put("credentialId", result.workingCredentialId);
+                    } else {
+                        activeHttp = new CameraHttp(repository, camera);
+                        if (cancelled.get() || closed.get()) { activeHttp.cancel(); throw new Exception("Camera task cancelled."); }
+                        row.put("credentialAttempts", camera.optString("credentialId").isEmpty() ? 0 : 1);
+                        try (Response response = activeHttp.get(CameraUrls.url(camera, path(camera, "http"), firstChannel))) {
+                            responseCode = response.code(); row.put("httpCode", responseCode);
+                            checkHttp(response);
+                            if (response.body().byteStream().read() == -1) throw new Exception("The camera returned an empty HTTP interface response. Check its configured path.");
+                            if (response.request().header("Authorization") != null)
+                                row.put("workingCredentialId", camera.optString("credentialId"));
+                        }
                     }
                     if (cancelled.get() || closed.get()) throw new Exception("Camera task cancelled.");
+                    row.put("httpCode", responseCode);
+                    batch.put("currentCredential", JSONObject.NULL);
                     connected = true; row.put("connectionStatus", "success");
-                    message = "HTTP " + responseCode + ": Connection successful.";
+                    message = "HTTP " + responseCode + ": " + (savedPasswords
+                            ? row.optString("workingCredentialId").isEmpty()
+                                ? "Snapshot endpoint is reachable without authentication; no password preset was verified."
+                                : "Password preset " + row.optString("workingCredentialId").substring(7) + " authenticated successfully."
+                            : "Connection successful.");
                     row.put("message", message);
                     batch.put("message", message + " Capturing configured channels…"); batchProgress(batch);
                     batchSnapshots(camera, row, batch);
+                    if (savedPasswords && row.optInt("snapshotsSaved") > 0 && !row.optString("workingCredentialId").isEmpty()
+                            && !cancelled.get() && !closed.get()) {
+                        try { repository.assignVerifiedCredential(camera.getString("id"), row.getString("workingCredentialId")); }
+                        catch (Exception e) { message += " The working preset could not be assigned to the camera: " + safeFailure(e); }
+                    }
                     String status = cancelled.get() || closed.get() ? "cancelled" : row.optInt("snapshotFailures") > 0 ? "snapshot-failed" : "success";
                     message += " " + row.optInt("snapshotsSaved") + " snapshots saved; " + row.optInt("snapshotFailures") + " snapshot failures; " + row.optInt("snapshotsFlagged") + " flagged for review.";
                     CameraBatchReport.finishRow(row, status, message);
@@ -276,7 +324,7 @@ public final class CameraBridge {
                     else if (!cancelled.get() && !closed.get()) row.put("snapshotFailures", row.optInt("snapshotFailures") + 1);
                     message = safeFailure(e);
                     CameraBatchReport.finishRow(row, status, message);
-                } finally { activeHttp = null; }
+                } finally { activeHttp = null; batch.put("currentCredential", JSONObject.NULL); }
                 batch.remove("currentResult");
                 batch.getJSONArray("results").put(row);
                 CameraBatchReport.totals(batch);
@@ -311,6 +359,7 @@ public final class CameraBridge {
             batch.put("message", "Camera " + batch.optInt("index") + "/" + batch.optInt("total") + ": downloading channel " + channel + "…");
             batchProgress(batch);
             int code = 0;
+            boolean stopAfterFailure = false;
             try (Response response = activeHttp.get(CameraUrls.url(camera, path(camera, "snapshot"), channel))) {
                 code = response.code(); outcome.put("httpCode", code); checkHttp(response);
                 if (response.body().contentLength() > SnapshotStore.MAX_IMAGE_BYTES) throw new Exception("Snapshot exceeds the 20 MB download limit.");
@@ -332,14 +381,19 @@ public final class CameraBridge {
                     code = ((CameraHttp.StatusException) e).statusCode; outcome.put("httpCode", code);
                 }
                 row.put("snapshotFailures", row.optInt("snapshotFailures") + 1);
-                outcome.put("status", CameraBatchReport.failureStatus(e, code, false)).put("message", safeFailure(e));
+                String failureStatus = CameraBatchReport.failureStatus(e, code, false);
+                outcome.put("status", failureStatus).put("message", safeFailure(e));
+                stopAfterFailure = row.optString("credentialMode").equals("saved-passwords")
+                        && (e instanceof CameraHttp.BodyReadException || code == 0
+                            && (failureStatus.equals("tls-error") || failureStatus.equals("timeout")
+                                || failureStatus.equals("unreachable")));
             }
             outcome.put("finishedAt", java.time.Instant.now().toString());
             row.getJSONArray("snapshotResults").put(outcome);
             CameraBatchReport.totals(batch); batchProgress(batch);
             batchSnapshotCheck(outcome);
-            // Do not retry one rejected assigned credential on every snapshot channel.
-            if (code == 401 || code == 403) return;
+            // Do not repeat a rejected or restricted credential on every snapshot channel.
+            if (stopAfterFailure || code == 401 || code == 403 || code == 423 || code == 429) return;
         }
     }
 
@@ -624,3 +678,4 @@ public final class CameraBridge {
         worker.shutdownNow();
     }
 }
+

@@ -8,6 +8,7 @@
   let selectedId = storage.read('camera-selected') || '', activeTab = storage.read('camera-tab') || 'devices';
   let initialized = false, diagnostics = [], toastTimer, galleryPage = 0, thumbnailObserver, usernameDirty = false, presetSavePending = false, pendingCameraForm = null;
   let batchSelection = new Set();
+  let batchCredentialMode = storage.read('camera-batch-credential-mode') === 'assigned' ? 'assigned' : 'saved-passwords';
   try { const saved = JSON.parse(storage.read('camera-batch-selection') || '[]'); if (Array.isArray(saved)) batchSelection = new Set(saved.map(String)); } catch (_) {}
   const thumbnailCache = new Map(), thumbnailRequested = new Set(), GALLERY_PAGE_SIZE = 48;
   const bridge = () => window.ReconCameras;
@@ -72,7 +73,7 @@
             ${field('IP address or hostname', 'cam-host', '', 'required autocapitalize="none" spellcheck="false" placeholder="192.168.1.20"')}
             <div class="two"><div class="field"><label for="cam-scheme">Web protocol</label><select id="cam-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div>${field('Web port', 'cam-port', '80', 'required type="number" min="1" max="65535"')}</div>
             <div class="field"><label for="cam-credential">Saved credential</label><select id="cam-credential"><option value="">No credential</option></select></div>
-            <p class="desc">Choose one saved password preset for this camera. Configure the shared username and six presets in Settings.</p>
+            <p class="desc">Choose a saved credential for manual viewing and assigned-credential checks. Automatic saved-password testing uses the shared username and configured presets in Settings.</p>
             ${field('Camera web interface path', 'cam-http-path', '/', 'placeholder="/" autocapitalize="none" spellcheck="false"')}
             ${field('Snapshot URL template', 'cam-snapshot-path', '/ISAPI/Streaming/channels/{channel}/picture', 'required autocapitalize="none" spellcheck="false"')}
             <p class="desc">Use {scheme}, {host}, {port} and {channel} to insert this camera's protocol, address, port and channel, for example {scheme}://{host}:{port}/ISAPI/Streaming/channels/{channel}/picture. A full URL must address this same camera. Keep passwords in Settings.</p>
@@ -89,10 +90,12 @@
           <div class="actions"><button class="btn ghost" id="cam-import-config">Import JSON</button><button class="btn ghost" id="cam-export-config">Export JSON</button></div>
         </section>
         <div class="cam-tools"><section class="section cam-batch-section"><h2>Automatic Camera Manager</h2>
-          <p>Select registered cameras in the list, then start. Each camera uses its assigned credential, checks its connection and captures its configured snapshot channels in sequence.</p>
+          <p>Select the registered cameras you own or administer. The manager checks each camera, saves its configured snapshot channels after a successful connection, then moves to the next camera.</p>
+          <div class="field"><label for="cam-batch-credential-mode">Credentials to use</label><select id="cam-batch-credential-mode"><option value="saved-passwords">Test saved passwords automatically</option><option value="assigned">Use each camera's assigned credential</option></select></div>
+          <p class="desc" id="cam-batch-mode-help"></p><p class="cam-credential-note" id="cam-batch-setup-status"></p><div class="actions"><button class="btn ghost" id="cam-batch-credential-settings">Manage username and passwords</button></div>
           <div class="actions"><button class="btn ghost" id="cam-batch-select-all">Select all cameras</button><button class="btn ghost" id="cam-batch-clear">Clear selection</button><span class="counter" id="cam-batch-selection-count">0 selected</span></div>
           <div class="actions cam-batch-controls"><button class="btn primary fill" id="cam-batch-start">Start</button><button class="btn warn" id="cam-batch-stop" disabled>Stop</button></div>
-          <div class="cam-batch-live" role="status" aria-live="polite" aria-atomic="true"><p id="cam-batch-current">No batch started.</p><progress id="cam-batch-progress" max="1" value="0" aria-label="Camera batch progress"></progress><div class="cam-batch-metrics"><div><strong id="cam-batch-completed">0 / 0</strong><span>Completed</span></div><div><strong id="cam-batch-successes">0</strong><span>Successful connections</span></div><div><strong id="cam-batch-failures">0</strong><span>Failures</span></div><div><strong id="cam-batch-snapshots">0</strong><span>Snapshots saved</span></div></div><p id="cam-batch-summary"></p></div>
+          <div class="cam-batch-live" role="status" aria-live="polite" aria-atomic="true"><p id="cam-batch-current">No batch started.</p><p class="cam-batch-credential" id="cam-batch-credential"></p><p class="desc" id="cam-batch-stage"></p><progress id="cam-batch-progress" max="1" value="0" aria-label="Camera batch progress"></progress><div class="cam-batch-metrics"><div><strong id="cam-batch-completed">0 / 0</strong><span>Completed</span></div><div><strong id="cam-batch-successes">0</strong><span>Successful connections</span></div><div><strong id="cam-batch-failures">0</strong><span>Failures</span></div><div><strong id="cam-batch-snapshots">0</strong><span>Snapshots saved</span></div></div><p id="cam-batch-summary"></p></div>
           <div class="actions"><button class="btn ghost" id="cam-batch-export" disabled>Export checks CSV</button><button class="btn ghost" id="cam-batch-diagnostics">Diagnostic TXT</button></div>
           <details class="cam-advanced"><summary>Completed camera checks</summary><div id="cam-batch-results" class="cam-history"></div></details>
         </section><section class="section"><h2>Connect and capture</h2>
@@ -120,13 +123,13 @@
         <p>Downloaded images stay in this app's gallery. Choose an Android folder for exports, or export an individual image to a location you select. Exact duplicate, empty and corrupted downloads are flagged for review.</p>
         <div class="cam-gallery" id="cam-gallery"></div><div class="actions" style="margin-top:14px"><button class="btn ghost" id="cam-gallery-previous">Previous</button><span class="counter" id="cam-gallery-page"></span><button class="btn ghost" id="cam-gallery-next">Next</button></div>
       </section></div>
-      <div class="cam-pane" id="cam-pane-credentials"><section class="section"><h2>Camera credentials</h2><p>Configure one shared username and six password presets in Settings. Choose one configured preset in each camera profile. Existing credentials remain available to preserve your camera connections.</p><div class="actions"><button class="btn primary" id="cam-open-credential-settings">Manage six presets</button></div><div class="line"></div><h2>Saved credentials</h2><p class="cam-credential-note">Only configuration status is displayed. Secrets are encrypted with Android Keystore.</p><div id="cam-credential-list"></div></section></div>
+      <div class="cam-pane" id="cam-pane-credentials"><section class="section"><h2>Camera credentials</h2><p>Configure one shared username and up to six password presets in Settings. The Automatic Camera Manager can try the configured passwords in preset order, stopping at the first successful authentication. Assign a credential to each camera for manual viewing or assigned-credential checks. Existing credentials remain available to preserve your camera connections.</p><div class="actions"><button class="btn primary" id="cam-open-credential-settings">Manage six presets</button></div><div class="line"></div><h2>Saved credentials</h2><p class="cam-credential-note">Only configuration status is displayed. Secrets are encrypted with Android Keystore.</p><div id="cam-credential-list"></div></section></div>
       <div class="cam-pane" id="cam-pane-activity"><section class="section"><h2>Device history</h2><p>Connection tests, captures and device actions are stored locally. Passwords are never included.</p><div class="field"><label for="cam-history-filter">Filter device history</label><input class="input" id="cam-history-filter" type="search" placeholder="Camera, action or date"></div><div class="cam-history" id="cam-history"></div></section></div>`;
     document.querySelector('.app').appendChild(view);
     const galleryView = $('view-gallery');
     if (galleryView) { galleryView.appendChild($('cam-pane-gallery').firstElementChild); galleryView.classList.add('cam-workspace'); }
     const settings = document.createElement('section'); settings.id = 'cam-preset-section'; settings.className = 'section';
-    settings.innerHTML = `<h2>Camera username and six password presets</h2><p>Enter the shared username once and save up to six passwords. Android Keystore encrypts saved credentials. Each registered camera uses only the preset you assign to it.</p><div class="field"><label for="cam-preset-username">Shared username</label><input class="input" id="cam-preset-username" maxlength="256" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Camera username"><small id="cam-username-status">Not configured</small></div><div class="two cam-preset-grid">${Array.from({length:6},(_,i)=>'<div class="field"><label for="cam-preset-'+(i+1)+'">Password preset '+(i+1)+'</label><input class="input" id="cam-preset-'+(i+1)+'" type="password" maxlength="1024" autocomplete="new-password" placeholder="Blank keeps saved password"><div class="cam-preset-meta"><small id="cam-preset-status-'+(i+1)+'">Not configured</small><button class="btn warn" type="button" id="cam-delete-preset-'+(i+1)+'" disabled>Delete preset '+(i+1)+'</button></div></div>').join('')}</div><div class="actions"><button class="btn primary" id="cam-save-presets">Save username and presets</button><button class="btn warn" id="cam-delete-all-presets">Delete saved username and presets</button></div><p class="desc">Blank fields keep existing saved values. Delete removes a saved preset without reinstalling. Saved passwords are never displayed. Existing camera assignments remain available until you change or delete them.</p>`;
+    settings.innerHTML = `<h2>Camera username and six password presets</h2><p>Enter the shared username once and save up to six passwords. Android Keystore encrypts saved credentials. Automatic saved-password testing tries configured presets from 1 to 6 for each selected authorized camera, stopping when authentication succeeds or all configured passwords fail. Assigned-credential checks and manual viewing use the credential chosen in the camera profile.</p><div class="field"><label for="cam-preset-username">Shared username</label><input class="input" id="cam-preset-username" maxlength="256" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Camera username"><small id="cam-username-status">Not configured</small></div><div class="two cam-preset-grid">${Array.from({length:6},(_,i)=>'<div class="field"><label for="cam-preset-'+(i+1)+'">Password preset '+(i+1)+'</label><input class="input" id="cam-preset-'+(i+1)+'" type="password" maxlength="1024" autocomplete="new-password" placeholder="Blank keeps saved password"><div class="cam-preset-meta"><small id="cam-preset-status-'+(i+1)+'">Not configured</small><button class="btn warn" type="button" id="cam-delete-preset-'+(i+1)+'" disabled>Delete preset '+(i+1)+'</button></div></div>').join('')}</div><div class="actions"><button class="btn primary" id="cam-save-presets">Save username and presets</button><button class="btn warn" id="cam-delete-all-presets">Delete saved username and presets</button></div><p class="desc">Blank fields keep existing saved values. Delete removes a saved preset without reinstalling. Saved passwords are never displayed. Existing camera assignments remain available until you change or delete them.</p>`;
     const settingsLayout = document.querySelector('#view-settings .layout');
     if (settingsLayout) settingsLayout.appendChild(settings); else view.appendChild(settings);
     bindActions(view); resetCameraForm(true); refresh(); restoreDraft(); showTab(activeTab === 'gallery' && galleryView ? 'devices' : activeTab);
@@ -307,6 +310,27 @@
     if (!matching.length) list.innerHTML = '<div class="empty">No matching device history</div>';
   }
   function rememberBatchSelection() { storage.write('camera-batch-selection', JSON.stringify([...batchSelection])); }
+  function batchPresets() {
+    return Array.from({length: 6}, (_, index) => {
+      const id = 'preset-' + (index + 1);
+      return state.passwordPresets.find(preset => String(preset.id) === id) || state.credentials.find(credential => String(credential.id) === id);
+    }).filter(Boolean);
+  }
+  function configuredBatchPresets() {
+    return batchPresets().filter(preset => !preset.unavailable && (preset.configured || preset.hasPassword));
+  }
+  function batchSetupError(mode = batchCredentialMode) {
+    if (mode !== 'saved-passwords') return '';
+    if (!state.usernameConfigured || state.usernameUnavailable) return 'Save a shared username in Settings before testing saved passwords.';
+    const unavailable = batchPresets().find(preset => preset.unavailable);
+    if (unavailable) return 'Replace or delete unavailable password preset ' + String(unavailable.id).slice(-1) + ' in Settings before testing saved passwords.';
+    if (!configuredBatchPresets().length) return 'Save at least one password preset in Settings before testing saved passwords.';
+    return '';
+  }
+  function credentialLabel(id) {
+    const preset = state.passwordPresets.find(item => String(item.id) === String(id)) || state.credentials.find(item => String(item.id) === String(id));
+    return preset && preset.name || (/^preset-[1-6]$/.test(String(id)) ? 'Password preset ' + String(id).slice(-1) : String(id));
+  }
   function savedBatchRows() {
     const batch = state.batch || {}, rows = Array.isArray(batch.results) ? batch.results.slice() : [];
     if (Array.isArray(state.batchHistory)) for (const run of state.batchHistory) {
@@ -319,12 +343,20 @@
   function renderBatch() {
     const batch = state.batch || {}, running = !!batch.running;
     const selected = state.cameras.filter(camera => camera.authorized && batchSelection.has(String(camera.id)));
+    const mode = running && batch.credentialMode ? batch.credentialMode : batchCredentialMode;
+    $('cam-batch-credential-mode').value = mode;
+    $('cam-batch-credential-mode').disabled = !!state.busy || running;
+    $('cam-batch-mode-help').textContent = mode === 'saved-passwords' ? 'Try the shared username with each configured password from preset 1 to 6. Stop at the first successful authentication, capture snapshots, and continue to the next camera. No per-camera credential assignment is required.' : 'Check each camera with its assigned saved credential, then capture snapshots after a successful connection.';
+    $('cam-batch-setup-status').textContent = mode === 'saved-passwords' ? batchSetupError(mode) || 'Shared username saved · ' + configuredBatchPresets().length + ' of 6 password presets ready.' : 'Set each camera\'s saved credential in its profile for this mode.';
     $('cam-batch-selection-count').textContent = selected.length + ' selected';
-    $('cam-batch-start').disabled = !!state.busy || running || !selected.length;
+    $('cam-batch-start').disabled = !!state.busy || running || !selected.length || !!batchSetupError();
     $('cam-batch-stop').disabled = !running;
     $('cam-batch-select-all').disabled = $('cam-batch-clear').disabled = !!state.busy || running;
     const currentCamera = batch.currentCamera && (state.cameras.find(camera => String(camera.id) === String(batch.currentCamera.id)) || batch.currentCamera);
     $('cam-batch-current').textContent = currentCamera ? 'Current: ' + cameraDisplay(currentCamera) : running ? 'Preparing selected cameras…' : batch.message || 'Select registered cameras to run automatic checks.';
+    const candidate = running && batch.currentCredential;
+    $('cam-batch-credential').textContent = candidate && Number(candidate.index) > 0 && Number(candidate.total) > 0 ? 'Password attempt ' + Number(candidate.index) + ' of ' + Number(candidate.total) + (candidate.id ? ' · ' + credentialLabel(candidate.id) : '') : '';
+    $('cam-batch-stage').textContent = running ? batch.message || '' : '';
     const total = Math.max(0, Number(batch.total) || 0), completed = Math.max(0, Number(batch.completed) || 0);
     $('cam-batch-progress').max = total || 1; $('cam-batch-progress').value = Math.min(total, completed);
     $('cam-batch-completed').textContent = completed + ' / ' + total;
@@ -340,8 +372,10 @@
     for (const item of rows.slice().reverse()) {
       const el = document.createElement('article'); el.className = 'cam-card cam-batch-result';
       const rawStatus = item.connectionStatus || item.status || 'Completed';
-      const status = ({success:'Connected','authentication-failed':'Authentication failed',unreachable:'Unreachable',timeout:'Timed out',cancelled:'Stopped','snapshot-failed':'Snapshot failed'})[rawStatus] || String(rawStatus).replace(/[_-]/g, ' ');
-      el.innerHTML = '<h3>' + escapeHtml(item.cameraName || item.host || 'Camera') + '</h3><small>' + escapeHtml(item.host || '') + '</small><strong>' + escapeHtml(status) + (item.httpCode ? ' · HTTP ' + escapeHtml(item.httpCode) : '') + '</strong><div>' + escapeHtml(item.message || '') + '</div><small>' + escapeHtml(captureTime({timestamp:item.finishedAt || item.startedAt})) + ' · ' + (Number(item.snapshotsSaved) || 0) + ' snapshot(s) saved' + (Number(item.snapshotFailures) ? ' · ' + Number(item.snapshotFailures) + ' snapshot failure(s)' : '') + '</small>';
+      const status = ({success:'Connected','authentication-failed':'Authentication failed',forbidden:'Access denied',locked:'Locked', 'rate-limited':'Rate limited',unreachable:'Unreachable',timeout:'Timed out',cancelled:'Stopped','snapshot-failed':'Snapshot failed'})[rawStatus] || String(rawStatus).replace(/[_-]/g, ' ');
+      const attempts = Number(item.credentialAttempts) || 0;
+      const credentialResult = item.credentialMode === 'saved-passwords' ? attempts + ' password attempt(s)' + (item.workingCredentialId ? ' · Working credential: ' + credentialLabel(item.workingCredentialId) : '') : item.workingCredentialId ? 'Credential: ' + credentialLabel(item.workingCredentialId) : '';
+      el.innerHTML = '<h3>' + escapeHtml(item.cameraName || item.host || 'Camera') + '</h3><small>' + escapeHtml(item.host || '') + '</small><strong>' + escapeHtml(status) + (item.httpCode ? ' · HTTP ' + escapeHtml(item.httpCode) : '') + '</strong><div>' + escapeHtml(item.message || '') + '</div>' + (credentialResult ? '<small class="cam-batch-credential-result">' + escapeHtml(credentialResult) + '</small>' : '') + '<small>' + escapeHtml(captureTime({timestamp:item.finishedAt || item.startedAt})) + ' · ' + (Number(item.snapshotsSaved) || 0) + ' snapshot(s) saved' + (Number(item.snapshotFailures) ? ' · ' + Number(item.snapshotFailures) + ' snapshot failure(s)' : '') + '</small>';
       list.appendChild(el);
     }
     if (!rows.length) list.innerHTML = '<div class="empty">Completed checks will stay here for review and CSV export.</div>';
@@ -401,12 +435,20 @@
     $('cam-cancel').onclick = () => command('cancel');
     $('cam-batch-select-all').onclick = () => { batchSelection = new Set(state.cameras.filter(camera => camera.authorized).map(camera => String(camera.id))); rememberBatchSelection(); renderCameras(); };
     $('cam-batch-clear').onclick = () => { batchSelection.clear(); rememberBatchSelection(); renderCameras(); };
+    $('cam-batch-credential-mode').onchange = () => {
+      if (state.busy || state.batch && state.batch.running) return;
+      batchCredentialMode = $('cam-batch-credential-mode').value === 'assigned' ? 'assigned' : 'saved-passwords';
+      storage.write('camera-batch-credential-mode', batchCredentialMode); renderBatch();
+    };
+    $('cam-batch-credential-settings').onclick = openCredentialSettings;
     $('cam-batch-start').onclick = () => {
       if (state.busy || state.batch && state.batch.running) return notify('A camera task is already running.');
       const cameraIds = state.cameras.filter(camera => camera.authorized && batchSelection.has(String(camera.id))).map(camera => camera.id);
       if (!cameraIds.length) return notify('Select at least one registered camera for automatic checks.');
-      if (command('batch-start', {cameraIds})) {
-        state.busy = true; state.batch = {running:true,status:'running',total:cameraIds.length,completed:0,successes:0,failures:0,snapshotsSaved:0,message:'Preparing selected cameras…',results:[]};
+      const setupError = batchSetupError();
+      if (setupError) return notify(setupError);
+      if (command('batch-start', {cameraIds,credentialMode:batchCredentialMode})) {
+        state.busy = true; state.batch = {running:true,status:'running',credentialMode:batchCredentialMode,total:cameraIds.length,completed:0,successes:0,failures:0,snapshotsSaved:0,message:'Preparing selected cameras…',results:[]};
         $('cam-status-text').textContent = 'Automatic camera checks starting…'; renderBusy();
       }
     };
@@ -513,3 +555,4 @@
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
+

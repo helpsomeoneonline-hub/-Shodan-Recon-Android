@@ -71,6 +71,45 @@ public final class CameraRepository {
         return credential(data(), id);
     }
 
+    /** Native-only snapshot of configured presets, in their fixed order, with one shared username. */
+    synchronized java.util.List<JSONObject> savedPasswordCredentials() throws Exception {
+        JSONObject source = data();
+        String username;
+        try { username = sharedUsername(source); }
+        catch (Exception e) { throw new Exception("The shared username cannot be decrypted. Re-enter it in Credentials."); }
+        if (username.isEmpty()) throw new Exception("Save the shared username and at least one password preset before starting automatic password testing.");
+        validateUsername(username);
+        java.util.List<JSONObject> candidates = new java.util.ArrayList<>();
+        for (int i = 1; i <= PRESET_COUNT; i++) {
+            String id = "preset-" + i;
+            JSONObject secret = credential(source, id);
+            if (secret == null) continue;
+            String password = secret.optString("password");
+            validateCredential(username, password);
+            candidates.add(new JSONObject().put("id", id).put("username", username).put("password", password));
+        }
+        if (candidates.isEmpty()) throw new Exception("Save at least one password preset before starting automatic password testing.");
+        return candidates;
+    }
+
+    /** Remember a verified preset without replacing other camera configuration. */
+    synchronized void assignVerifiedCredential(String cameraId, String credentialId) throws Exception {
+        JSONObject source = data();
+        JSONObject secret = credential(source, credentialId);
+        if (!presetId(credentialId) || secret == null) throw new Exception("The working password preset is no longer available.");
+        JSONArray cameras = source.optJSONArray("cameras");
+        if (cameras != null) for (int i = 0; i < cameras.length(); i++) {
+            JSONObject camera = cameras.getJSONObject(i);
+            if (!camera.optString("id").equals(cameraId)) continue;
+            if (!camera.optBoolean("authorized")) throw new Exception("Register this camera and confirm authorization first.");
+            validateSecretFreePaths(camera, secret);
+            camera.put("credentialId", credentialId);
+            persist(source);
+            return;
+        }
+        throw new Exception("Camera profile no longer exists. Select a registered camera.");
+    }
+
     private JSONObject credential(JSONObject source, String id) throws Exception {
         JSONObject records = source.optJSONObject("credentials");
         if (records == null || !records.has(id)) return null;
@@ -581,3 +620,4 @@ public final class CameraRepository {
         return new String(cipher.doFinal(Base64.decode(parts[offset + 1], Base64.NO_WRAP)), StandardCharsets.UTF_8);
     }
 }
+
