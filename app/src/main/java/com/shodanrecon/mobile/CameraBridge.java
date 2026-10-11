@@ -386,7 +386,9 @@ public final class CameraBridge {
                 if (requestCode == STORAGE) {
                     int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                     if ((flags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) == 0) throw new Exception("The folder picker did not grant write access.");
-                    activity.getContentResolver().takePersistableUriPermission(uri, flags);
+                    if ((flags & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0)
+                        activity.getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    else activity.getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                     snapshots.selectStorage(uri); publish(); notice(true, "New snapshots will also be copied to the selected folder. Existing images remain in app storage.");
                 } else if (requestCode == EXPORT_IMAGE) {
                     String id = pendingImage;
