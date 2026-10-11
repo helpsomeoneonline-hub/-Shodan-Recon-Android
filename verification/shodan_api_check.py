@@ -40,7 +40,7 @@ def status_message(status: int) -> str:
 def fetch_json(key: str, endpoint: str, connection_factory: Callable, *, search: bool = False) -> dict:
     params = {"key": key}
     if search:
-        params.update({"query": DEFAULT_QUERY, "page": "1", "minify": "true", "fields": SEARCH_FIELDS})
+        params.update({"query": DEFAULT_QUERY, "page": "1", "minify": "false", "fields": SEARCH_FIELDS})
     connection = None
     try:
         # Fixed HTTPS host with ordinary certificate/hostname verification. HTTPSConnection
