@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 HOST = "api.shodan.io"
 DEFAULT_QUERY = "port:80 (DNVRS-Webs OR Hikvision-Webs OR web OR App-webs OR DVRDVS-Webs)"
+SEARCH_FIELDS = "ip_str,port,product,org,location.country_name,timestamp"
 MAX_RESPONSE_BYTES = 1_200_000
 KNOWN_PLANS = {"free", "dev", "developer", "oss", "edu", "smallbiz", "corporate", "enterprise", "member", "subscription"}
 
@@ -39,7 +40,7 @@ def status_message(status: int) -> str:
 def fetch_json(key: str, endpoint: str, connection_factory: Callable, *, search: bool = False) -> dict:
     params = {"key": key}
     if search:
-        params.update({"query": DEFAULT_QUERY, "page": "1"})
+        params.update({"query": DEFAULT_QUERY, "page": "1", "minify": "true", "fields": SEARCH_FIELDS})
     connection = None
     try:
         # Fixed HTTPS host with ordinary certificate/hostname verification. HTTPSConnection
@@ -106,6 +107,11 @@ def verify(key: str, connection_factory: Callable = http.client.HTTPSConnection,
         matches = search.get("matches")
         if not isinstance(matches, list):
             raise VerificationFailure("Shodan search response is missing its result list; response contents were withheld.")
+        for match in matches:
+            if (not isinstance(match, dict) or not isinstance(match.get("ip_str"), str)
+                    or not match["ip_str"] or type(match.get("port")) is not int
+                    or not 1 <= match["port"] <= 65535):
+                raise VerificationFailure("Shodan search result is missing expected IP and port fields; response contents were withheld.")
         emit(f"Default-query search verified: HTTP 200; page=1; total={total}; returned results={len(matches)}.")
         emit("PASSED: Live account and one search verified. No discovered device was contacted; no APK build or artifact received the key.")
         return 0

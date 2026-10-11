@@ -159,7 +159,10 @@ public class MainActivity extends Activity {
         String key = readApiKey();
         if (key.isEmpty()) throw new Exception("Enter your Shodan API key in Settings first.");
         String url = "https://api.shodan.io/" + endpoint + "?key=" + URLEncoder.encode(key, "UTF-8");
-        if (query != null) url += "&query=" + URLEncoder.encode(query, "UTF-8") + "&page=" + page;
+        // Request only the metadata shown/exported by this dashboard. Full service
+        // banners can exceed the bounded mobile response size even for one page.
+        if (query != null) url += "&query=" + URLEncoder.encode(query, "UTF-8") + "&page=" + page
+                + "&minify=true&fields=" + URLEncoder.encode("ip_str,port,product,org,location.country_name,timestamp", "UTF-8");
         okhttp3.Call call = shodanClient.newCall(new okhttp3.Request.Builder().url(url).header("Accept", "application/json").build());
         if (token != null) synchronized (this) {
             if (!token.equals(activeSearchToken)) { call.cancel(); throw new Exception("Search cancelled"); }

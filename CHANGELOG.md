@@ -13,4 +13,5 @@
   favorites, history, CSV export and external player integration.
 - Add responsive camera/dashboard layouts and expandable native viewer.
 - Add authentication, URL, stream-parser and dashboard regression tests.
+- Request displayed Shodan metadata explicitly to avoid oversized service banners.
 - Run tests/lint/APK build in Actions and stabilize future development signing.

@@ -55,7 +55,7 @@ def account(**updates):
 
 
 def search(**updates):
-    data = {"total": 100, "matches": [{"ip_str": "192.0.2.1", "secret": FAKE_KEY}]}
+    data = {"total": 100, "matches": [{"ip_str": "192.0.2.1", "port": 80, "secret": FAKE_KEY}]}
     data.update(updates)
     return FakeResponse(data=data)
 
@@ -96,6 +96,8 @@ class ShodanVerificationTests(unittest.TestCase):
         params = parse_qs(urlsplit(fixture.requests[1][1]).query)
         self.assertEqual(["1"], params["page"])
         self.assertEqual([checker.DEFAULT_QUERY], params["query"])
+        self.assertEqual([checker.SEARCH_FIELDS], params["fields"])
+        self.assertEqual(["true"], params["minify"])
 
     def test_missing_secret_reports_skipped_without_network(self):
         fixture = FakeFactory([])
@@ -171,6 +173,17 @@ class ShodanVerificationTests(unittest.TestCase):
         self.assertEqual(1, result)
         self.assertIn("1.2 MB", text)
         self.assertEqual(checker.MAX_RESPONSE_BYTES + 1, response.read_limit)
+
+    def test_projected_results_require_ip_and_port_without_logging_values(self):
+        for match in [{"port": 80}, {"ip_str": "192.0.2.1"},
+                      {"ip_str": "192.0.2.1", "port": "80"},
+                      {"ip_str": "192.0.2.1", "port": 0},
+                      {"ip_str": "", "port": 80}, FAKE_KEY]:
+            with self.subTest(match_type=type(match).__name__):
+                result, text = self.run_check(FakeFactory([account(), search(matches=[match])]))
+                self.assertEqual(1, result)
+                self.assertIn("missing expected IP and port fields", text)
+                self.assertIn("contents were withheld", text)
 
     def test_coincident_numeric_secret_is_redacted_from_stdout(self):
         fixture = FakeFactory([account(query_credits=123456789), search(total=123456789)])
