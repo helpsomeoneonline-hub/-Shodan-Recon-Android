@@ -29,7 +29,7 @@ SMOKE_PHASE=fresh
 if [[ -f update-baseline-apk/app-debug.apk ]]; then
   "$SMOKE_TOOLS/apksigner" verify --print-certs update-baseline-apk/app-debug.apk > smoke-results/baseline-signature.txt
   "$SMOKE_TOOLS/apksigner" verify --print-certs smoke-apk/app-debug.apk > smoke-results/update-signature.txt
-  python3 -c 'import re; from pathlib import Path; cert=lambda p: {v.replace(":", "").lower() for v in re.findall(r"^Signer[^\n]*certificate SHA-256 digest:\s*([a-fA-F0-9:]+)\s*$",Path(p).read_text(),re.MULTILINE)}; baseline=cert("smoke-results/baseline-signature.txt"); assert baseline and baseline==cert("smoke-results/update-signature.txt"), "Installed-version signing identity changed"'
+  python3 -c 'import re; from pathlib import Path; cert=lambda p: {re.sub(r"[:\s]", "", v).lower() for v in re.findall(r"^Signer[^\n]*certificate SHA-256 digest:\s*([a-fA-F0-9:\s]+)\s*$",Path(p).read_text(),re.MULTILINE|re.IGNORECASE)}; baseline=cert("smoke-results/baseline-signature.txt"); assert baseline and baseline==cert("smoke-results/update-signature.txt"), "Installed-version signing identity changed"'
   adb install -r -t update-baseline-apk/app-debug.apk > smoke-results/baseline-install.txt
   adb install -r -t smoke-build/harness.apk
   adb shell am instrument -w -e phase seed com.shodanrecon.smoke/com.shodanrecon.smoke.SmokeInstrumentation > smoke-results/baseline-seed.txt 2>&1
