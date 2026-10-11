@@ -102,7 +102,14 @@
         <p>Downloaded images stay in this app's gallery. Choose an Android folder for exports, or export an individual image to a location you select. Exact duplicate, empty and corrupted downloads are flagged for review.</p>
         <div class="cam-gallery" id="cam-gallery"></div><div class="actions" style="margin-top:14px"><button class="btn ghost" id="cam-gallery-previous">Previous</button><span class="counter" id="cam-gallery-page"></span><button class="btn ghost" id="cam-gallery-next">Next</button></div>
       </section></div>
-      <div class="cam-pane" id="cam-pane-credentials"><div class="cam-layout"><section class="section"><h2>Saved device credentials</h2><p class="cam-credential-note">Secrets are encrypted with Android Keystore. Camera profiles choose credentials individually. This app never tries passwords on Shodan results.</p><div id="cam-credential-list"></div></section>
+      <div class="cam-pane" id="cam-pane-credentials"><section class="section">
+        <h2>Six reusable credential presets</h2>
+        <p>Set one username and up to six password presets for cameras you manage. They are stored encrypted in Android Keystore. Assign one preset to each registered camera; no automatic password-list testing occurs.</p>
+        <div class="field"><label for="cam-preset-username">Shared username</label><input class="input" id="cam-preset-username" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Camera username"></div>
+        <div class="two">${Array.from({length:6},(_,i)=>'<div class="field"><label for="cam-preset-'+(i+1)+'">Password '+(i+1)+'</label><input class="input" id="cam-preset-'+(i+1)+'" type="password" autocomplete="new-password" placeholder="Leave empty to keep saved preset"><small id="cam-preset-status-'+(i+1)+'">Not saved</small></div>').join('')}</div>
+        <div class="actions"><button class="btn primary" id="cam-save-presets">Save entered presets</button></div>
+        <p class="desc">Leave a password field blank to keep its existing saved value. To remove a preset, delete it from Saved device credentials below. Select its credential in an authorized camera profile.</p>
+      </section><div class="cam-layout"><section class="section"><h2>Saved device credentials</h2><p class="cam-credential-note">Secrets are encrypted with Android Keystore. Camera profiles choose credentials individually. This app never tries passwords on Shodan results.</p><div id="cam-credential-list"></div></section>
         <section class="section"><h2 id="cam-credential-heading">Add credential</h2><form id="cam-credential-form" autocomplete="off"><input type="hidden" id="cam-credential-id">
           ${field('Credential name', 'cam-credential-name', '', 'required maxlength="100" placeholder="Entrance camera account"')}
           ${field('Username', 'cam-credential-user', '', 'autocapitalize="none" spellcheck="false" autocomplete="off"')}
@@ -208,6 +215,11 @@
       el.querySelector('.delete').onclick = () => { const associated = state.cameras.filter(camera => String(camera.credentialId) === String(credential.id)).length; if (confirm('Delete this saved credential?' + (associated ? ' It is selected by ' + associated + ' camera profile(s); those cameras will need another credential.' : ''))) command('delete-credential', {id: credential.id}); };
       list.appendChild(el);
     }
+    for (let i=1;i<=6;i++) {
+      const preset=state.credentials.find(c=>String(c.id)==='preset-'+i);
+      const status=$('cam-preset-status-'+i);
+      if(status) status.textContent=preset && preset.hasPassword?'Saved securely':'Not saved';
+    }
     if (!state.credentials.length) list.innerHTML = '<div class="empty">No device credentials saved</div>';
     if (state.credentials.some(credential => String(credential.id) === chosen)) $('cam-credential').value = chosen;
   }
@@ -305,6 +317,20 @@
     $('cam-gallery-next').onclick = () => { galleryPage++; renderSnapshots(); };
     $('cam-select-storage').onclick = () => command('select-storage');
     $('cam-delete-flagged').onclick = () => { const count = state.snapshots.filter(snapshot => snapshot.flagged).length; if (count && confirm('Permanently delete all ' + count + ' flagged snapshots, including exact duplicates and corrupted or empty downloads?')) command('delete-flagged'); };
+    $('cam-save-presets').onclick=()=>{
+      const username=$('cam-preset-username').value.trim();
+      if(!username || username.includes(':')) return notify('Enter a valid username before saving presets.');
+      const entries=[];
+      for(let i=1;i<=6;i++){
+        const password=$('cam-preset-'+i).value;
+        if(password) entries.push({id:'preset-'+i,name:'Password preset '+i,username,password});
+      }
+      if(!entries.length) return notify('Enter at least one new password to save.');
+      if(entries.some(e=>e.password.length>1024)) return notify('One password is too long.');
+      for(const entry of entries) command('save-credential',entry);
+      for(let i=1;i<=6;i++) $('cam-preset-'+i).value='';
+      notify('Saving '+entries.length+' encrypted preset(s). Assign one to each camera profile.');
+    };
     $('cam-new-credential').onclick = resetCredentialForm;
     $('cam-credential-form').onsubmit = event => {
       event.preventDefault(); const id = $('cam-credential-id').value;
