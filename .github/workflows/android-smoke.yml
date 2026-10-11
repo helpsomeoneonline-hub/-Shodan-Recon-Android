@@ -1,23 +1,32 @@
 name: Android emulator smoke
 on:
   workflow_dispatch:
-  push:
+    inputs:
+      build_run:
+        description: Successful Build Android APK run ID
+        required: true
+      build_sha:
+        description: Exact application commit SHA from that run
+        required: true
+  workflow_run:
+    workflows: [Build Android APK]
+    types: [completed]
     branches: [main]
-    paths:
-      - '.github/workflows/android-smoke.yml'
-      - 'smoke/**'
 permissions:
   contents: read
   actions: read
 jobs:
   smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      APK_BUILD_RUN: '38141506505'
-      APK_BUILD_SHA: '9098d4c480b7961947b3663e7c35604c40fa8f0a'
+      APK_BUILD_RUN: ${{ github.event.workflow_run.id || inputs.build_run }}
+      APK_BUILD_SHA: ${{ github.event.workflow_run.head_sha || inputs.build_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.APK_BUILD_SHA }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

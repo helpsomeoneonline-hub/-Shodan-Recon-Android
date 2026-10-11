@@ -73,6 +73,17 @@ if args.apk:
     version_match = re.search(r'\bversionCode\s+(\d+)\b', gradle_file)
     assert version_match is not None, 'Unable to find app version code in Gradle'
     assert "versionCode='" + version_match.group(1) + "'" in identity, 'APK version code does not match Gradle'
-    subprocess.run([str(toolset / 'apksigner'), 'verify', str(args.apk)], check=True, capture_output=True)
+    version_name = re.search(r"\bversionName\s+['\"]([^'\"]+)['\"]", gradle_file)
+    assert version_name is not None and "versionName='" + version_name.group(1) + "'" in identity, 'APK version name does not match Gradle'
+    signing = subprocess.check_output([str(toolset / 'apksigner'), 'verify', '--print-certs', str(args.apk)], text=True)
+    certificates = re.findall(r'^(?:V\d+\s+)?Signer[^\n]*certificate SHA-256 digest:\s*([a-fA-F0-9:]+)\s*$', signing, re.MULTILINE | re.IGNORECASE)
+    # Public certificate of the existing committed development key; no private
+    # key or account secret is accessed by this comparison.
+    expected_certificate = '470633fe1ecb95ada9e18ca05e2b7d370bf3c5066a3cf793d6f3c5363ca03088'
+    actual_certificates = {re.sub(r'[:\s]', '', value).lower() for value in certificates}
+    print('APK signer certificate SHA-256:', ', '.join(sorted(actual_certificates)) or 'unrecognized certificate line')
+    if not actual_certificates:
+        print(signing)
+    assert actual_certificates == {expected_certificate}, 'Existing development signing certificate changed: ' + repr(sorted(actual_certificates))
     print(identity)
-    print('APK contents, package identity and cryptographic signing verification passed.')
+    print('APK contents, version, package identity and existing signing certificate verified.')

@@ -22,6 +22,11 @@ import android.webkit.WebViewClient;
 import android.webkit.WebResourceRequest;
 import android.widget.Toast;
 
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -124,13 +129,36 @@ public class MainActivity extends Activity {
         cameras = new CameraBridge(this, this::send);
         webView.addJavascriptInterface(cameras, "ReconCameras");
         webView.setBackgroundColor(0xff03101e);
+        // Keep the entire WebView viewport above system bars and the keyboard.
+        // CSS safe-area values alone are not reliable in Android WebView.
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        WindowCompat.getInsetsController(getWindow(), webView).setAppearanceLightStatusBars(false);
+        WindowCompat.getInsetsController(getWindow(), webView).setAppearanceLightNavigationBars(false);
+        ViewCompat.setOnApplyWindowInsetsListener(webView, (view, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars()
+                    | WindowInsetsCompat.Type.displayCutout());
+            Insets keyboard = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
+            view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, keyboard.bottom));
+            return windowInsets;
+        });
         setContentView(webView);
+        ViewCompat.requestApplyInsets(webView);
         webView.loadUrl("file:///android_asset/index.html");
     }
 
     private void send(String kind, JSONObject payload) {
         if (diagnostics != null) {
-            if (!payload.optBoolean("ok", true))
+            if ("batch-check".equals(kind) || "batch-snapshot-check".equals(kind)) {
+                int code = payload.optInt("httpCode", 0);
+                diagnostics.add("camera", "batch-" + payload.optString("status", "check"),
+                        code >= 100 && code <= 599 ? "http-" + code
+                                : payload.optBoolean("ok", false) ? "ok"
+                                : DiagnosticLog.errorCode(payload.optString("error", "")));
+            } else if ("camera-notice".equals(kind) && payload.optBoolean("ok", false)
+                    && payload.optString("message").startsWith("Connection test passed:")) {
+                diagnostics.add("camera", "connection-success",
+                        DiagnosticLog.errorCode(payload.optString("message")));
+            } else if (!payload.optBoolean("ok", true))
                 diagnostics.add(kind.startsWith("camera-") ? "camera" : "network", kind,
                         DiagnosticLog.errorCode(payload.optString("error", "")));
             else if ("api-info".equals(kind) || "search".equals(kind) || "lan-done".equals(kind))

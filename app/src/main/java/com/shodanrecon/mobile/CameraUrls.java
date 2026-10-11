@@ -32,6 +32,10 @@ public final class CameraUrls {
         if (port < 1 || port > 65535) throw new IllegalArgumentException("Camera port must be between 1 and 65535.");
         if (pathOrUrl != null) rejectControlCharacters(pathOrUrl);
         String configured = pathOrUrl == null || pathOrUrl.isEmpty() ? "/" : pathOrUrl;
+        // Bracket IPv6 in a URL authority; the registered host itself remains unbracketed.
+        String address = host.contains(":") ? "[" + host + "]" : host;
+        configured = configured.replace("{scheme}", scheme).replace("{host}", address)
+                .replace("{ip}", address).replace("{port}", Integer.toString(port));
         if (configured.contains("{channel}")) {
             if (channel < 1 || channel > 99999) throw new IllegalArgumentException("Choose a valid snapshot channel.");
             configured = configured.replace("{channel}", Integer.toString(channel));
@@ -40,7 +44,7 @@ public final class CameraUrls {
         if (configured.contains("\\") || configured.startsWith("//"))
             throw new IllegalArgumentException("Use a camera path starting with a single slash.");
         if (configured.contains("{" ) || configured.contains("}"))
-            throw new IllegalArgumentException("Only the {channel} URL template is supported.");
+            throw new IllegalArgumentException("Supported URL templates are {scheme}, {host}, {ip}, {port} and {channel}.");
         try {
             URI parsed = new URI(configured);
             if (parsed.getRawFragment() != null || parsed.getRawUserInfo() != null)

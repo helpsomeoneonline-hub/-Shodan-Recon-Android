@@ -20,8 +20,11 @@ import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.CRC32;
 
 /** Images remain in app storage; an optional user-selected folder receives additional copies. */
 public final class SnapshotStore {
@@ -55,18 +58,33 @@ public final class SnapshotStore {
 
     public synchronized File file(String id) throws Exception {
         JSONObject entry = entry(id);
-        String name = entry.optString("fileName");
-        if (!name.matches("snapshot_[A-Za-z0-9_-]+\\.(jpg|png|webp|gif|img)")) throw new Exception("Invalid stored image filename.");
-        File file = new File(directory, name);
+        File file = resolveStoredFile(directory, entry.optString("fileName"));
         if (!file.isFile()) throw new Exception("Snapshot file is missing.");
         return file;
     }
 
     public synchronized long storageBytes() {
+        return directoryBytes(directory);
+    }
+
+    private static long directoryBytes(File directory) {
         long bytes = 0;
         File[] files = directory.listFiles();
-        if (files != null) for (File file : files) if (file.isFile()) bytes += file.length();
+        if (files != null) for (File file : files) {
+            if (file.isFile()) bytes += file.length();
+            else if (file.isDirectory()) bytes += directoryBytes(file);
+        }
         return bytes;
+    }
+
+    /** Flat legacy filenames remain valid so an ordinary app update preserves gallery history. */
+    static File resolveStoredFile(File directory, String name) throws Exception {
+        if (name == null || !name.matches("(?:camera_[A-Za-z0-9_-]{1,80}/[0-9]{4}-[0-9]{2}-[0-9]{2}/)?snapshot_[A-Za-z0-9_-]+\\.(jpg|png|webp|gif|img)"))
+            throw new Exception("Invalid stored image filename.");
+        File file = new File(directory, name);
+        if (!file.getCanonicalPath().startsWith(directory.getCanonicalPath() + File.separator))
+            throw new Exception("Invalid stored image location.");
+        return file;
     }
 
     public synchronized String storageLocation() {
@@ -89,6 +107,8 @@ public final class SnapshotStore {
         JSONArray result = new JSONArray(), entries = records();
         for (int i = 0; i < entries.length(); i++) {
             JSONObject entry = new JSONObject(entries.getJSONObject(i).toString());
+            entry.put("status", status(entry));
+            if (!entry.has("captureDate")) entry.put("captureDate", captureDate(entry));
             entry.remove("fileName"); entry.remove("treeCopy");
             entry.put("thumbnail", i < 100 && !"corrupt".equals(entry.optString("reason")) && !"empty".equals(entry.optString("reason"))
                     ? thumbnail(entries.getJSONObject(i).optString("fileName")) : "");
@@ -97,11 +117,38 @@ public final class SnapshotStore {
         return result;
     }
 
+    /** Counts include retained invalid captures, which remain reviewable and deletable in the gallery. */
+    public synchronized JSONObject counts() throws Exception {
+        JSONObject result = new JSONObject().put("total", 0).put("valid", 0).put("duplicate", 0)
+                .put("empty", 0).put("corrupt", 0).put("oversized", 0).put("flagged", 0);
+        JSONArray entries = records();
+        result.put("total", entries.length());
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject entry = entries.getJSONObject(i);
+            String status = status(entry);
+            if (result.has(status) && !status.equals("flagged")) result.put(status, result.getInt(status) + 1);
+            if (!status.equals("valid")) result.put("flagged", result.getInt("flagged") + 1);
+        }
+        return result;
+    }
+
+    private static String status(JSONObject entry) {
+        String reason = entry.optString("reason");
+        return reason.isEmpty() ? "valid" : reason;
+    }
+
+    private static String captureDate(JSONObject entry) {
+        try { return Instant.parse(entry.optString("capturedAt")).atZone(ZoneOffset.UTC).toLocalDate().toString(); }
+        catch (Exception ignored) {
+            long timestamp = entry.optLong("timestamp", 0);
+            return timestamp > 0 ? Instant.ofEpochMilli(timestamp).atZone(ZoneOffset.UTC).toLocalDate().toString() : "";
+        }
+    }
+
     private String thumbnail(String name) {
-        if (!name.matches("snapshot_[A-Za-z0-9_-]+\\.(jpg|png|webp|gif|img)")) return "";
         Bitmap image = null;
         try {
-            File file = new File(directory, name);
+            File file = resolveStoredFile(directory, name);
             BitmapFactory.Options bounds = new BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
             BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
             if (bounds.outWidth < 1 || bounds.outHeight < 1 || (long) bounds.outWidth * bounds.outHeight > 100000000) return "";
@@ -147,17 +194,27 @@ public final class SnapshotStore {
                 }
                 output.flush();
             }
-            if (cancelled.get()) throw new Exception("Capture cancelled.");
+            if (cancelled.get() || Thread.currentThread().isInterrupted()) throw new Exception("Capture cancelled.");
             String hash = hex(digest.digest());
             JSONObject inspection = inspect(temporary);
+            if (cancelled.get() || Thread.currentThread().isInterrupted()) throw new Exception("Capture cancelled.");
             String mime = inspection.getString("mimeType"), reason = inspection.getString("reason");
             String extension = mime.equals("image/png") ? "png" : mime.equals("image/webp") ? "webp" : mime.equals("image/gif") ? "gif" : mime.equals("image/jpeg") ? "jpg" : "img";
-            destination = new File(directory, "snapshot_" + id + "." + extension);
+            Instant capturedAt = Instant.now();
+            String captureDate = capturedAt.atZone(ZoneOffset.UTC).toLocalDate().toString();
+            String cameraId = camera.getString("id");
+            String storageId = cameraId.matches("[A-Za-z0-9_-]{1,80}") ? cameraId
+                    : hex(MessageDigest.getInstance("SHA-256").digest(cameraId.getBytes(StandardCharsets.UTF_8)));
+            String relativeName = "camera_" + storageId + "/" + captureDate + "/snapshot_" + id + "." + extension;
+            destination = resolveStoredFile(directory, relativeName);
+            if (!destination.getParentFile().isDirectory() && !destination.getParentFile().mkdirs())
+                throw new Exception("Cannot create camera snapshot folder.");
+            if (cancelled.get() || Thread.currentThread().isInterrupted()) throw new Exception("Capture cancelled.");
             if (!temporary.renameTo(destination)) throw new Exception("Cannot save snapshot file.");
-            JSONObject entry = new JSONObject().put("id", id).put("cameraId", camera.getString("id"))
+            JSONObject entry = new JSONObject().put("id", id).put("cameraId", cameraId)
                     .put("cameraName", camera.optString("name", camera.optString("host"))).put("ip", camera.optString("host"))
-                    .put("channel", channel).put("capturedAt", Instant.now().toString()).put("timestamp", System.currentTimeMillis())
-                    .put("sizeBytes", size).put("mimeType", mime).put("sha256", hash).put("fileName", destination.getName())
+                    .put("channel", channel).put("capturedAt", capturedAt.toString()).put("timestamp", capturedAt.toEpochMilli()).put("captureDate", captureDate)
+                    .put("sizeBytes", size).put("mimeType", mime).put("sha256", hash).put("fileName", relativeName)
                     .put("width", inspection.getInt("width")).put("height", inspection.getInt("height"));
             synchronized (this) {
                 JSONArray previous = records();
@@ -171,8 +228,10 @@ public final class SnapshotStore {
                     }
                 }
                 entry.put("flagged", !reason.isEmpty()).put("reason", reason);
+                entry.put("status", status(entry));
                 JSONArray updated = new JSONArray().put(entry);
                 for (int i = 0; i < previous.length(); i++) updated.put(previous.get(i));
+                if (cancelled.get() || Thread.currentThread().isInterrupted()) throw new Exception("Capture cancelled.");
                 persist(updated);
                 // Once metadata commits, preserve the image even if the optional folder copy fails.
                 destination = null;
@@ -225,13 +284,20 @@ public final class SnapshotStore {
             else updated.put(item);
         }
         if (target == null) throw new Exception("Snapshot no longer exists.");
-        String name = target.optString("fileName");
-        if (!name.matches("snapshot_[A-Za-z0-9_-]+\\.(jpg|png|webp|gif|img)")) throw new Exception("Invalid stored image filename.");
-        File file = new File(directory, name);
+        File file = resolveStoredFile(directory, target.optString("fileName"));
         if (file.exists() && !file.delete()) throw new Exception("Snapshot could not be deleted.");
         String treeCopy = target.optString("treeCopy");
         if (!treeCopy.isEmpty()) try { DocumentsContract.deleteDocument(context.getContentResolver(), Uri.parse(treeCopy)); } catch (Exception ignored) { /* Optional exported copy may have been moved. */ }
         persist(updated);
+        removeEmptyCameraFolders(file.getParentFile());
+    }
+
+    private void removeEmptyCameraFolders(File folder) {
+        while (folder != null && !folder.equals(directory)) {
+            File[] contents = folder.listFiles();
+            if (contents == null || contents.length != 0 || !folder.delete()) return;
+            folder = folder.getParentFile();
+        }
     }
 
     public synchronized int deleteFlagged() throws Exception {
@@ -264,9 +330,11 @@ public final class SnapshotStore {
         if (reason.isEmpty()) {
             BitmapFactory.Options sample = new BitmapFactory.Options(); sample.inSampleSize = 1;
             while (bounds.outWidth / sample.inSampleSize > 512 || bounds.outHeight / sample.inSampleSize > 512) sample.inSampleSize *= 2;
-            Bitmap verification = BitmapFactory.decodeFile(image.getAbsolutePath(), sample);
-            if (verification == null) reason = "corrupt";
-            else verification.recycle();
+            try {
+                Bitmap verification = BitmapFactory.decodeFile(image.getAbsolutePath(), sample);
+                if (verification == null || verification.getWidth() < 1 || verification.getHeight() < 1) reason = "corrupt";
+                if (verification != null) verification.recycle();
+            } catch (OutOfMemoryError memory) { reason = "oversized"; }
         }
         return new JSONObject().put("mimeType", mime).put("reason", reason)
                 .put("width", Math.max(0, bounds.outWidth)).put("height", Math.max(0, bounds.outHeight));
@@ -274,18 +342,95 @@ public final class SnapshotStore {
 
     static boolean completeImage(File image, String mime) {
         try (RandomAccessFile file = new RandomAccessFile(image, "r")) {
-            if (mime.equals("image/jpeg")) {
-                if (file.length() < 4) return false;
-                file.seek(file.length() - 2);
-                return file.readUnsignedByte() == 255 && file.readUnsignedByte() == 217;
+            if (mime.equals("image/jpeg")) return completeJpeg(file);
+            if (mime.equals("image/png")) return completePng(file);
+            if (mime.equals("image/gif")) {
+                if (file.length() < 14) return false;
+                byte[] signature = new byte[6]; file.readFully(signature);
+                String header = new String(signature, StandardCharsets.US_ASCII);
+                file.seek(file.length() - 1);
+                return (header.equals("GIF87a") || header.equals("GIF89a")) && file.readUnsignedByte() == 0x3b;
             }
-            if (mime.equals("image/png")) {
-                if (file.length() < 12) return false;
-                file.seek(file.length() - 12);
-                byte[] tail = new byte[12]; file.readFully(tail);
-                return tail[4] == 'I' && tail[5] == 'E' && tail[6] == 'N' && tail[7] == 'D';
+            if (mime.equals("image/webp")) {
+                if (file.length() < 20 || file.readInt() != 0x52494646) return false; // RIFF
+                long length = Integer.toUnsignedLong(Integer.reverseBytes(file.readInt()));
+                return file.readInt() == 0x57454250 && length + 8 == file.length(); // WEBP
             }
-            return true;
+            return false;
         } catch (Exception e) { return false; }
+    }
+
+    private static boolean completeJpeg(RandomAccessFile file) throws Exception {
+        if (file.length() < 4 || file.readUnsignedShort() != 0xffd8) return false;
+        boolean frame = false, scan = false;
+        int pendingMarker = -1;
+        while (pendingMarker >= 0 || file.getFilePointer() < file.length()) {
+            int marker;
+            if (pendingMarker >= 0) { marker = pendingMarker; pendingMarker = -1; }
+            else {
+                if (file.readUnsignedByte() != 0xff) return false;
+                do { marker = file.readUnsignedByte(); } while (marker == 0xff);
+            }
+            if (marker == 0xd9) return frame && scan && file.getFilePointer() == file.length();
+            if (marker == 0 || marker == 0xd8 || marker >= 0xd0 && marker <= 0xd7) return false;
+            if (marker == 0x01) continue; // Standalone TEM marker.
+            int length = file.readUnsignedShort();
+            long end = file.getFilePointer() + length - 2L;
+            if (length < 2 || end > file.length()) return false;
+            if (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc) {
+                if (length < 11) return false;
+                file.readUnsignedByte(); // precision; actual supported decoding is checked by BitmapFactory.
+                int height = file.readUnsignedShort(), width = file.readUnsignedShort(), components = file.readUnsignedByte();
+                if (height == 0 || width == 0 || components < 1 || components > 4 || length != 8 + 3 * components) return false;
+                frame = true;
+            }
+            if (marker == 0xda) {
+                if (!frame || length < 8) return false;
+                int components = file.readUnsignedByte();
+                if (components < 1 || components > 4 || length != 6 + 2 * components) return false;
+                scan = true;
+            }
+            file.seek(end);
+            if (marker == 0xda) {
+                // Entropy bytes may contain escaped FF bytes and restart markers. Other markers end this scan.
+                boolean entropy = false;
+                while (file.getFilePointer() < file.length()) {
+                    if (file.readUnsignedByte() != 0xff) { entropy = true; continue; }
+                    int next;
+                    do { next = file.readUnsignedByte(); } while (next == 0xff);
+                    if (next == 0) { entropy = true; continue; }
+                    if (next >= 0xd0 && next <= 0xd7) continue;
+                    pendingMarker = next;
+                    break;
+                }
+                if (pendingMarker < 0 || !entropy) return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean completePng(RandomAccessFile file) throws Exception {
+        if (file.length() < 45 || file.readLong() != 0x89504e470d0a1a0aL) return false;
+        boolean header = false, pixels = false;
+        byte[] buffer = new byte[16384];
+        while (file.getFilePointer() + 12 <= file.length()) {
+            long length = Integer.toUnsignedLong(file.readInt());
+            byte[] type = new byte[4]; file.readFully(type);
+            String chunk = new String(type, StandardCharsets.US_ASCII);
+            if (length > file.length() - file.getFilePointer() - 4) return false;
+            if (!header && (!chunk.equals("IHDR") || length != 13)) return false;
+            if (header && chunk.equals("IHDR")) return false;
+            CRC32 crc = new CRC32(); crc.update(type);
+            long remaining = length;
+            while (remaining > 0) {
+                int read = (int) Math.min(buffer.length, remaining);
+                file.readFully(buffer, 0, read); crc.update(buffer, 0, read); remaining -= read;
+            }
+            if (crc.getValue() != Integer.toUnsignedLong(file.readInt())) return false;
+            if (chunk.equals("IHDR")) header = true;
+            if (chunk.equals("IDAT") && length > 0) pixels = true;
+            if (chunk.equals("IEND")) return header && pixels && length == 0 && file.getFilePointer() == file.length();
+        }
+        return false;
     }
 }

@@ -201,7 +201,7 @@ test('selected IP scanning requires explicit scope authorization and omits publi
 test('CSV export neutralizes spreadsheet formula prefixes and quotes fields', () => {
   const ui = dashboard({ results: [result('192.168.1.2', 80, '=SUM(1,2)')] });
   ui.click('export-results'); const csv = ui.callsTo('exportCsv')[0].args[0];
-  assert.match(csv, /"'=SUM\(1,2\)"/); assert.match(csv, /^IP,Port,Product,Country,Organization\r\n/);
+  assert.match(csv, /"'=SUM\(1,2\)"/); assert.match(csv, /^IP,Port,Product,Country,Organization,Source\r\n/);
 });
 
 test('clear workspace restores clean defaults after favorites and history mutate', () => {
@@ -214,6 +214,70 @@ test('clear workspace restores clean defaults after favorites and history mutate
   assert.equal(ui.state().favorites.length, 0); assert.equal(ui.state().history.length, 0);
   assert.equal(ui.state().results.length, 0); assert.equal(ui.state().settings.query, query);
   assert.equal(ui.callsTo('deleteApiKey').length, 0);
+});
+
+test('save displayed Shodan results retains ports and provenance without connecting to cameras', () => {
+  const ui = dashboard(); ui.click('start-search');
+  const token = ui.callsTo('searchShodanTagged')[0].args[2];
+  ui.reply('search', { token, matches: [result('192.168.1.2', 80), result('192.168.1.2', 443)] });
+  ui.click('save-visible-ips');
+  assert.deepEqual(ui.state().ipList, ['192.168.1.2']);
+  assert.deepEqual(ui.state().ipDetails['192.168.1.2'].sources, ['shodan']);
+  assert.deepEqual(ui.state().ipDetails['192.168.1.2'].ports, [80, 443]);
+  assert.equal(ui.callsTo('scanAuthorized').length, 0);
+});
+
+test('saving the same IP from private scanning preserves both origins across reload', () => {
+  const ui = dashboard({ ipList: ['192.168.1.2'], ipDetails: {
+    '192.168.1.2': { sources: ['shodan'], ports: [443] }
+  }, results: [{ ...result('192.168.1.2', 80), source: 'private-scan' }] });
+  ui.click('save-visible-ips');
+  const reloaded = dashboard(ui.state());
+  assert.deepEqual(reloaded.state().ipDetails['192.168.1.2'].sources, ['shodan', 'private-scan']);
+  assert.deepEqual(reloaded.state().ipDetails['192.168.1.2'].ports, [443, 80]);
+  assert.equal(reloaded.state().ipList.length, 1);
+});
+
+test('TXT and CSV imports canonicalize addresses, reject invalid octets, and retain source', () => {
+  const ui = dashboard();
+  ui.reply('ip-import', { text: 'IP,Name\n192.168.001.002,Office\n999.2.3.4,Invalid\n10.0.0.3,Gate\n192.168.1.2,Duplicate' });
+  assert.deepEqual(ui.state().ipList, ['192.168.1.2', '10.0.0.3']);
+  assert.deepEqual(ui.state().ipDetails['10.0.0.3'].sources, ['imported']);
+  assert.equal(ui.callsTo('scanAuthorized').length, 0);
+});
+
+test('sorting and source filters apply to displayed results and exported CSV', () => {
+  const ui = dashboard({ results: [
+    { ...result('192.168.1.100'), source: 'shodan' },
+    { ...result('192.168.1.2'), source: 'shodan' },
+    { ...result('10.0.0.1'), source: 'private-scan' }
+  ] });
+  ui.element('results-source').value = 'shodan'; ui.element('results-source').dispatch('change');
+  ui.element('results-sort').value = 'ip'; ui.element('results-sort').dispatch('change');
+  ui.click('export-results'); const csv = ui.callsTo('exportCsv')[0].args[0];
+  assert.ok(csv.indexOf('192.168.1.2') < csv.indexOf('192.168.1.100'));
+  assert.ok(!csv.includes('10.0.0.1'));
+  assert.equal(ui.element('all-results').children.length, 2);
+  assert.equal(dashboard(ui.state()).element('results-sort').value, 'ip');
+});
+
+test('selected IP opens registration using its saved port without copy/paste or a network request', () => {
+  const ui = dashboard({ ipList: ['192.168.1.2'], selectedIPs: ['192.168.1.2'],
+    ipDetails: { '192.168.1.2': { sources: ['private-scan'], ports: [554, 443] } } });
+  const registrations = [];
+  ui.window.CameraManager = { registerFromIp: (...args) => registrations.push(args) };
+  ui.click('register-selected-ip');
+  assert.deepEqual(registrations, [['192.168.1.2', 443, 'private-scan']]);
+  assert.equal(ui.callsTo('scanAuthorized').length, 0);
+});
+
+test('IP List pagination makes every stored address reviewable', () => {
+  const ips = Array.from({ length: 310 }, (_, i) => `10.0.${Math.floor(i / 256)}.${i % 256}`);
+  const ui = dashboard({ ipList: ips });
+  assert.equal(ui.element('ip-book').children.length, 100);
+  ui.click('book-next'); ui.click('book-next'); ui.click('book-next');
+  assert.equal(ui.element('ip-book').children.length, 10);
+  assert.match(ui.element('book-page').textContent, /Page 4 of 4/);
 });
 
 console.log(`${count} dashboard behavior tests passed.`);

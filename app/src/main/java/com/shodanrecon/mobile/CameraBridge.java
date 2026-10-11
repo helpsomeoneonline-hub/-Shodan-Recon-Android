@@ -35,21 +35,24 @@ import okhttp3.Response;
 
 /** Native commands accept only manually registered cameras, never a list of Shodan results. */
 public final class CameraBridge {
-    private static final int STORAGE = 6101, EXPORT_IMAGE = 6102, EXPORT_CONFIG = 6103, IMPORT_CONFIG = 6104;
+    private static final int STORAGE = 6101, EXPORT_IMAGE = 6102, EXPORT_CONFIG = 6103, IMPORT_CONFIG = 6104, EXPORT_BATCH = 6105;
     private final Activity activity;
     private final BiConsumer<String, JSONObject> send;
     private final CameraRepository repository;
     private final SnapshotStore snapshots;
+    private final CameraBatchStore batches;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy = new AtomicBoolean();
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile CameraHttp activeHttp;
-    private String pendingImage = "", pendingConfig = "";
+    private volatile String pendingImage = "", pendingConfig = "", pendingBatch = "";
 
     public CameraBridge(Activity activity, BiConsumer<String, JSONObject> send) {
         this.activity = activity; this.send = send;
         repository = new CameraRepository(activity); snapshots = new SnapshotStore(activity);
+        batches = new CameraBatchStore(activity);
+        try { batches.interrupt(); } catch (Exception e) { notice(false, "Previous camera check report could not be restored. Existing reports were preserved."); }
         File[] previousProbes = activity.getCacheDir().listFiles();
         if (previousProbes != null) for (File probe : previousProbes) if (probe.getName().startsWith("camera_probe_") && probe.getName().endsWith(".tmp")) probe.delete();
     }
@@ -57,7 +60,8 @@ public final class CameraBridge {
     private JSONObject currentState() throws Exception {
         JSONObject state = repository.state();
         state.put("snapshots", snapshots.state()).put("storageBytes", snapshots.storageBytes())
-                .put("storageLocation", snapshots.storageLocation()).put("busy", busy.get()).put("ok", true);
+                .put("storageLocation", snapshots.storageLocation()).put("busy", busy.get()).put("ok", true)
+                .put("batch", batches.state()).put("batchHistory", batches.history());
         return state;
     }
 
@@ -68,7 +72,7 @@ public final class CameraBridge {
 
     @JavascriptInterface public void command(String action, String json) {
         if (closed.get()) return;
-        if ("cancel".equals(action)) {
+        if ("cancel".equals(action) || "batch-stop".equals(action)) {
             cancelled.set(true); CameraHttp transport = activeHttp;
             if (transport != null) transport.cancel();
             notice(true, busy.get() ? "Cancelling camera task…" : "No camera task is running.");
@@ -77,21 +81,27 @@ public final class CameraBridge {
         if (action == null || action.length() > 40 || json == null || json.length() > 65536) {
             notice(false, "Camera command is invalid or too large."); return;
         }
+        boolean taskAcquired = false;
         try {
             final JSONObject args = new JSONObject(json);
-            if ((action.equals("capture") || action.equals("test-camera")) && !busy.compareAndSet(false, true)) {
+            boolean cameraTask = action.equals("capture") || action.equals("test-camera") || action.equals("batch-start");
+            if (cameraTask && !busy.compareAndSet(false, true)) {
                 notice(false, "A camera task is already running. Stop it before starting another."); return;
             }
-            if (action.equals("capture") || action.equals("test-camera")) cancelled.set(false);
+            taskAcquired = cameraTask;
+            if (cameraTask) cancelled.set(false);
             worker.execute(() -> {
                 try {
                     switch (action) {
                         case "save-camera": repository.saveCamera(args); publish(); notice(true, "Camera profile saved."); break;
                         case "delete-camera": repository.deleteCamera(args.optString("id")); publish(); notice(true, "Camera profile deleted. Saved snapshots were retained."); break;
                         case "save-credential": repository.saveCredential(args); publish(); notice(true, "Device credential saved securely."); break;
+                        case "save-presets": repository.savePresets(args); publish(); notice(true, "Shared username and password presets saved securely.", action); break;
                         case "delete-credential": repository.deleteCredential(args.optString("id")); publish(); notice(true, "Credential deleted and removed from associated cameras."); break;
                         case "capture": capture(args); break;
                         case "test-camera": test(args); break;
+                        case "batch-start": batch(args); break;
+                        case "batch-export": exportBatch(); break;
                         case "open-viewer": openViewer(args); break;
                         case "preview-snapshot": case "preview": preview(args.optString("id")); break;
                         case "share-snapshot": case "share": share(args.optString("id")); break;
@@ -109,14 +119,17 @@ public final class CameraBridge {
                     if (action.equals("capture") || action.equals("test-camera")) {
                         try { repository.record(args.optString("id"), action, cancelled.get() ? "Cancelled" : "Failed"); } catch (Exception ignored) {}
                     }
-                    notice(false, cancelled.get() && (action.equals("capture") || action.equals("test-camera")) ? "Camera task cancelled." : safeFailure(e));
+                    notice(false, cancelled.get() && cameraTask ? "Camera task cancelled." : safeFailure(e), action);
                 } finally {
-                    if (action.equals("capture") || action.equals("test-camera")) {
+                    if (cameraTask) {
                         activeHttp = null; busy.set(false); publish();
                     }
                 }
             });
-        } catch (Exception e) { notice(false, "Camera command is invalid."); }
+        } catch (Exception e) {
+            if (taskAcquired) busy.set(false);
+            notice(false, "Camera command is invalid.");
+        }
     }
 
     private void publish() {
@@ -132,8 +145,12 @@ public final class CameraBridge {
     }
 
     private void notice(boolean ok, String message) {
+        notice(ok, message, "");
+    }
+
+    private void notice(boolean ok, String message, String action) {
         if (closed.get()) return;
-        try { send.accept("camera-notice", new JSONObject().put("ok", ok).put(ok ? "message" : "error", repository.sanitize(message))); }
+        try { send.accept("camera-notice", new JSONObject().put("ok", ok).put("action", action).put(ok ? "message" : "error", repository.sanitize(message))); }
         catch (Exception ignored) {}
     }
 
@@ -177,6 +194,153 @@ public final class CameraBridge {
         if (code == 404) throw new Exception("HTTP 404: Camera path or channel was not found. Check the configured URL template.");
         if (!response.isSuccessful()) throw new Exception("Camera returned HTTP " + code + ". Check the camera configuration and service availability.");
         if (response.body() == null) throw new Exception("The camera returned no response body.");
+    }
+
+    private void batchProgress(JSONObject batch) throws Exception {
+        if (closed.get()) return;
+        batches.update(batch);
+        send.accept("batch-progress", new JSONObject(batch.toString()).put("ok", true));
+    }
+
+    private void batchCheck(JSONObject row) {
+        if (closed.get()) return;
+        try {
+            boolean ok = row.optString("connectionStatus").equals("success");
+            JSONObject event = new JSONObject().put("ok", ok).put("status", row.optString("connectionStatus"))
+                    .put("httpCode", row.optInt("httpCode")).put("elapsedMs", row.optLong("elapsedMs"))
+                    .put(ok ? "message" : "error", repository.sanitize(row.optString("message")));
+            send.accept("batch-check", event);
+        } catch (Exception ignored) {}
+    }
+
+    private void batchSnapshotCheck(JSONObject outcome) {
+        if (closed.get()) return;
+        try {
+            boolean ok = outcome.optString("status").equals("saved") || outcome.optString("status").equals("duplicate");
+            send.accept("batch-snapshot-check", new JSONObject().put("ok", ok)
+                    .put("status", outcome.optString("status")).put("httpCode", outcome.optInt("httpCode"))
+                    .put(ok ? "message" : "error", repository.sanitize(outcome.optString("message"))));
+        } catch (Exception ignored) {}
+    }
+
+    /** Selection is resolved only from persisted, authorized profiles; discovery results cannot become requests. */
+    private java.util.List<JSONObject> batchSelection(JSONObject args) throws Exception {
+        return CameraBatchReport.selection(args.optJSONArray("cameraIds"), repository::camera);
+    }
+
+    private void batch(JSONObject args) throws Exception {
+        java.util.List<JSONObject> selected = batchSelection(args);
+        if (cancelled.get() || closed.get()) throw new Exception("Camera task cancelled.");
+        JSONObject batch = batches.start(selected.size());
+        String endStatus = "completed";
+        try {
+            batchProgress(batch);
+            for (int index = 0; index < selected.size(); index++) {
+                if (cancelled.get() || closed.get()) { endStatus = "cancelled"; break; }
+                JSONObject camera = selected.get(index);
+                JSONObject row = CameraBatchReport.begin(camera, batch.getString("runId"));
+                row.put("cameraName", repository.sanitize(row.optString("cameraName")));
+                batch.put("currentCamera", new JSONObject().put("id", camera.getString("id"))
+                                .put("name", repository.sanitize(camera.optString("name"))).put("host", camera.optString("host"))
+                                .put("scheme", camera.optString("scheme")).put("port", camera.optInt("port")))
+                        .put("index", index + 1).put("currentResult", row)
+                        .put("message", "Testing camera " + (index + 1) + " of " + selected.size() + "…");
+                batchProgress(batch);
+                String message;
+                int responseCode = 0;
+                boolean connected = false;
+                try {
+                    activeHttp = new CameraHttp(repository, camera);
+                    if (cancelled.get() || closed.get()) { activeHttp.cancel(); throw new Exception("Camera task cancelled."); }
+                    int firstChannel = camera.getJSONArray("channels").optInt(0, 101);
+                    try (Response response = activeHttp.get(CameraUrls.url(camera, path(camera, "http"), firstChannel))) {
+                        responseCode = response.code(); row.put("httpCode", responseCode);
+                        checkHttp(response);
+                        if (response.body().byteStream().read() == -1) throw new Exception("The camera returned an empty HTTP interface response. Check its configured path.");
+                    }
+                    if (cancelled.get() || closed.get()) throw new Exception("Camera task cancelled.");
+                    connected = true; row.put("connectionStatus", "success");
+                    message = "HTTP " + responseCode + ": Connection successful.";
+                    row.put("message", message);
+                    batch.put("message", message + " Capturing configured channels…"); batchProgress(batch);
+                    batchSnapshots(camera, row, batch);
+                    String status = cancelled.get() || closed.get() ? "cancelled" : row.optInt("snapshotFailures") > 0 ? "snapshot-failed" : "success";
+                    message += " " + row.optInt("snapshotsSaved") + " snapshots saved; " + row.optInt("snapshotFailures") + " snapshot failures; " + row.optInt("snapshotsFlagged") + " flagged for review.";
+                    CameraBatchReport.finishRow(row, status, message);
+                } catch (Exception | OutOfMemoryError e) {
+                    if (e instanceof CameraHttp.StatusException) {
+                        responseCode = ((CameraHttp.StatusException) e).statusCode; row.put("httpCode", responseCode);
+                    }
+                    String status = CameraBatchReport.failureStatus(e, responseCode, cancelled.get() || closed.get());
+                    if (!connected) row.put("connectionStatus", status);
+                    else if (!cancelled.get() && !closed.get()) row.put("snapshotFailures", row.optInt("snapshotFailures") + 1);
+                    message = safeFailure(e);
+                    CameraBatchReport.finishRow(row, status, message);
+                } finally { activeHttp = null; }
+                batch.remove("currentResult");
+                batch.getJSONArray("results").put(row);
+                CameraBatchReport.totals(batch);
+                batch.put("message", row.optString("message"));
+                batchProgress(batch); batchCheck(row);
+                repository.record(camera.getString("id"), "batch-check", row.optString("message"));
+                if (cancelled.get() || closed.get()) { endStatus = "cancelled"; break; }
+            }
+        } catch (Exception | OutOfMemoryError e) {
+            endStatus = cancelled.get() || closed.get() ? "cancelled" : "interrupted";
+            throw e;
+        } finally {
+            CameraBatchReport.finish(batch, endStatus);
+            batchProgress(batch);
+            if (!closed.get()) { publish(); notice(endStatus.equals("completed"), batch.optString("message")); }
+        }
+    }
+
+    private void batchSnapshots(JSONObject camera, JSONObject row, JSONObject batch) throws Exception {
+        JSONArray configured = camera.optJSONArray("channels");
+        if (configured == null || configured.length() < 1 || configured.length() > 64) throw new Exception("Configure 1–64 snapshot channels for this camera.");
+        java.util.LinkedHashSet<Integer> channels = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < configured.length(); i++) {
+            int channel = configured.optInt(i, -1);
+            if (channel < 1 || channel > 65535) throw new Exception("Snapshot channels must be 1–65535.");
+            channels.add(channel);
+        }
+        for (int channel : channels) {
+            if (cancelled.get() || closed.get()) return;
+            JSONObject outcome = new JSONObject().put("channel", channel).put("httpCode", 0)
+                    .put("startedAt", java.time.Instant.now().toString());
+            batch.put("message", "Camera " + batch.optInt("index") + "/" + batch.optInt("total") + ": downloading channel " + channel + "…");
+            batchProgress(batch);
+            int code = 0;
+            try (Response response = activeHttp.get(CameraUrls.url(camera, path(camera, "snapshot"), channel))) {
+                code = response.code(); outcome.put("httpCode", code); checkHttp(response);
+                if (response.body().contentLength() > SnapshotStore.MAX_IMAGE_BYTES) throw new Exception("Snapshot exceeds the 20 MB download limit.");
+                JSONObject image = snapshots.save(response.body().byteStream(), camera, channel, cancelled);
+                String reason = image.optString("reason");
+                outcome.put("snapshotId", image.getString("id")).put("reason", reason);
+                if (image.optBoolean("flagged")) row.put("snapshotsFlagged", row.optInt("snapshotsFlagged") + 1);
+                if (reason.isEmpty() || reason.equals("duplicate")) {
+                    row.put("snapshotsSaved", row.optInt("snapshotsSaved") + 1);
+                    outcome.put("status", reason.equals("duplicate") ? "duplicate" : "saved").put("message", "Snapshot saved.");
+                } else {
+                    row.put("snapshotFailures", row.optInt("snapshotFailures") + 1);
+                    outcome.put("status", "invalid-image").put("message", "Snapshot flagged: " + reason + ". Review it in the gallery.");
+                }
+                if (!image.optString("storageWarning").isEmpty()) outcome.put("storageWarning", image.optString("storageWarning"));
+            } catch (Exception | OutOfMemoryError e) {
+                if (cancelled.get() || closed.get()) return;
+                if (e instanceof CameraHttp.StatusException) {
+                    code = ((CameraHttp.StatusException) e).statusCode; outcome.put("httpCode", code);
+                }
+                row.put("snapshotFailures", row.optInt("snapshotFailures") + 1);
+                outcome.put("status", CameraBatchReport.failureStatus(e, code, false)).put("message", safeFailure(e));
+            }
+            outcome.put("finishedAt", java.time.Instant.now().toString());
+            row.getJSONArray("snapshotResults").put(outcome);
+            CameraBatchReport.totals(batch); batchProgress(batch);
+            batchSnapshotCheck(outcome);
+            // Do not retry one rejected assigned credential on every snapshot channel.
+            if (code == 401 || code == 403) return;
+        }
     }
 
     private void test(JSONObject args) throws Exception {
@@ -364,6 +528,16 @@ public final class CameraBridge {
         });
     }
 
+    private void exportBatch() throws Exception {
+        if (!pendingBatch.isEmpty()) throw new Exception("Finish or cancel the current camera check export first.");
+        pendingBatch = batches.csv();
+        activity.runOnUiThread(() -> {
+            try { activity.startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("text/csv").putExtra(Intent.EXTRA_TITLE, "shodan_recon_camera_checks.csv"), EXPORT_BATCH); }
+            catch (Exception e) { pendingBatch = ""; notice(false, "The Android file picker could not be opened."); }
+        });
+    }
+
     private void launchImport() {
         activity.runOnUiThread(() -> {
             try { activity.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
@@ -373,11 +547,12 @@ public final class CameraBridge {
     }
 
     public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode < STORAGE || requestCode > IMPORT_CONFIG) return false;
+        if (requestCode < STORAGE || requestCode > EXPORT_BATCH) return false;
         if (closed.get()) return true;
         if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
             if (requestCode == EXPORT_IMAGE) pendingImage = "";
             if (requestCode == EXPORT_CONFIG) pendingConfig = "";
+            if (requestCode == EXPORT_BATCH) pendingBatch = "";
             notice(true, "File selection cancelled."); return true;
         }
         Uri uri = data.getData();
@@ -404,6 +579,12 @@ public final class CameraBridge {
                         output.write(pendingConfig.getBytes(StandardCharsets.UTF_8));
                     } finally { pendingConfig = ""; }
                     notice(true, "Camera configuration exported without credentials. Imported devices require authorization confirmation.");
+                } else if (requestCode == EXPORT_BATCH) {
+                    try (OutputStream output = activity.getContentResolver().openOutputStream(uri, "w")) {
+                        if (output == null) throw new Exception("The selected file cannot be written.");
+                        output.write(pendingBatch.getBytes(StandardCharsets.UTF_8));
+                    } finally { pendingBatch = ""; }
+                    notice(true, "Camera check CSV exported without usernames or passwords.");
                 } else readImport(uri);
             } catch (Exception e) { notice(false, safeFailure(e)); }
         });
@@ -439,6 +620,7 @@ public final class CameraBridge {
     public void close() {
         closed.set(true); cancelled.set(true);
         CameraHttp transport = activeHttp; if (transport != null) transport.cancel();
+        try { batches.interrupt(); } catch (Exception ignored) { /* Startup will also recover an unfinished report. */ }
         worker.shutdownNow();
     }
 }

@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0 — versionCode 5
+
+- Add sequential Automatic Camera Manager with multi-selection, Start/Stop,
+  assigned-credential HTTP checks, automatic configured-channel snapshots,
+  current-camera progress, counters, summaries and persistent per-camera results.
+- Continue after authentication/network failures; prevent overlapping runs and
+  retain completed/stopped/interrupted reports with CSV export.
+- Add one shared username and exactly six Keystore-encrypted password presets,
+  configured status, replacement/deletion and camera assignment. Preserve legacy
+  credentials and existing camera assignments during updates.
+- Add discovery source labels, result sorting/source filters, displayed-result
+  CSV export, direct result-to-IP saving and IP-to-camera registration.
+- Add Gallery navigation, camera/address/date filters, camera/date storage folders
+  and stricter complete-image validation while preserving existing images.
+- Add host/address/port/channel URL templates with existing origin and TLS checks.
+- Preserve Shodan integration and HTTP 400 metadata/query handling, private scans,
+  existing viewer protocols, diagnostic TXT export and saved settings.
+- Retain package/signing identity; verify version and signing certificate in CI.
+  Add exact-APK emulator smoke for baseline-to-new in-place updates, retained
+  Keystore credentials and controlled loopback batch/cancellation checks.
+
 ## 1.2.1 — versionCode 4
 
 - Add private, size-bounded diagnostics journal recording Shodan HTTP/network failures, private-LAN scan outcomes, camera operations and viewer failures.

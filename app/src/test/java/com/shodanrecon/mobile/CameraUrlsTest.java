@@ -25,6 +25,25 @@ public class CameraUrlsTest {
         JSONObject c = camera().put("scheme", "https").put("host", "[2001:db8::1]").put("port", 8443);
         assertEquals("https://[2001:db8::1]:8443/picture", CameraUrls.url(c, "/picture", 101));
     }
+    @Test public void fullUrlTemplatesInsertTheRegisteredOriginAndSelectedChannel() throws Exception {
+        JSONObject c = camera().put("scheme", "https").put("port", 8443);
+        assertEquals("https://192.168.1.12:8443/cameras/1601/snapshot.jpg",
+                CameraUrls.url(c, "{scheme}://{host}:{port}/cameras/{channel}/snapshot.jpg", 1601));
+        assertEquals("https://192.168.1.12:8443/cameras/101/snapshot.jpg",
+                CameraUrls.url(c, "{scheme}://{ip}:{port}/cameras/{channel}/snapshot.jpg", 101));
+        assertEquals("https://[2001:db8::1]:8443/cameras/101/snapshot.jpg",
+                CameraUrls.url(c.put("host", "2001:db8::1"), "{scheme}://{host}:{port}/cameras/{channel}/snapshot.jpg", 101));
+    }
+    @Test public void substitutedTemplatesStillRejectOriginChangesAndCredentials() throws Exception {
+        invalid(camera(), "{scheme}://elsewhere.example:{port}/picture");
+        invalid(camera(), "https://{host}:{port}/picture");
+        invalid(camera(), "{scheme}://admin:secret@{ip}:{port}/picture");
+        invalid(camera(), "{scheme}://{host}:{port}/picture?password=secret");
+        invalid(camera(), "/picture/{username}");
+        invalid(camera(), "/picture/{password}");
+        try { CameraUrls.url(camera(), "/picture/{channel}", 0); fail("Invalid channel accepted"); }
+        catch (IllegalArgumentException expected) { assertFalse(expected.getMessage().isEmpty()); }
+    }
     @Test public void canonicalizesDomainButChecksOrigin() throws Exception {
         JSONObject c = camera().put("host", "CAMERA.example");
         assertEquals("http://camera.example/path", CameraUrls.url(c, "http://camera.example:80/path", 101));

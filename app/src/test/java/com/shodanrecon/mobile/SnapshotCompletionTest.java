@@ -46,4 +46,71 @@ public class SnapshotCompletionTest {
         assertFalse(SnapshotStore.completeImage(tiny, "image/png"));
         assertFalse(SnapshotStore.completeImage(new File(folder.getRoot(), "missing.jpg"), "image/jpeg"));
     }
+
+    @Test public void jpegEndMarkerCannotHideAnIncompleteHeaderOrMissingScan() throws Exception {
+        File valid = generatedImage("jpeg");
+        byte[] bytes = Files.readAllBytes(valid.toPath());
+        File cut = folder.newFile("cut-with-end.jpg");
+        byte[] truncated = Arrays.copyOf(bytes, 40); // Inside the quantization table segment.
+        truncated[38] = (byte) 0xff; truncated[39] = (byte) 0xd9;
+        Files.write(cut.toPath(), truncated);
+        assertFalse(SnapshotStore.completeImage(cut, "image/jpeg"));
+        File markersOnly = folder.newFile("markers-only.jpg");
+        Files.write(markersOnly.toPath(), new byte[]{(byte) 0xff, (byte) 0xd8, (byte) 0xff, (byte) 0xd9});
+        assertFalse(SnapshotStore.completeImage(markersOnly, "image/jpeg"));
+        bytes[0] = 0; Files.write(valid.toPath(), bytes);
+        assertFalse(SnapshotStore.completeImage(valid, "image/jpeg"));
+    }
+
+    @Test public void pngIntactEndMarkerCannotHideACorruptChunk() throws Exception {
+        File valid = generatedImage("png");
+        byte[] bytes = Files.readAllBytes(valid.toPath());
+        bytes[50] ^= 1; // Alter compressed IDAT bytes without updating their checksum.
+        Files.write(valid.toPath(), bytes);
+        assertFalse(SnapshotStore.completeImage(valid, "image/png"));
+    }
+
+    @Test public void unknownContentAndExtraDataAfterEndMarkersAreRejected() throws Exception {
+        assertFalse(SnapshotStore.completeImage(generatedImage("jpeg"), "application/octet-stream"));
+        File valid = generatedImage("png");
+        byte[] bytes = Files.readAllBytes(valid.toPath());
+        Files.write(valid.toPath(), Arrays.copyOf(bytes, bytes.length + 1));
+        assertFalse(SnapshotStore.completeImage(valid, "image/png"));
+    }
+
+    @Test public void gifAndWebpSupportRemainsAvailableWithTruncationDetection() throws Exception {
+        String[] formats = {"gif", "webp"};
+        String[] fixtures = {
+                "R0lGODdhCAAIAIEAANxGWgAAAAAAAAAAACwAAAAACAAIAAAIDwABCBxIsKDBgwgTKkwYEAA7",
+                "UklGRjgAAABXRUJQVlA4ICwAAACQAQCdASoIAAgAAUAmJaACdLoAA5gA/uC5evKfE23/20P/1of/rQ/7IAAAAA=="
+        };
+        for (int i = 0; i < formats.length; i++) {
+            File image = folder.newFile("snapshot." + formats[i]);
+            byte[] bytes = Base64.getDecoder().decode(fixtures[i]);
+            Files.write(image.toPath(), bytes);
+            assertTrue(SnapshotStore.completeImage(image, "image/" + formats[i]));
+            Files.write(image.toPath(), Arrays.copyOf(bytes, bytes.length - 1));
+            assertFalse(SnapshotStore.completeImage(image, "image/" + formats[i]));
+        }
+    }
+
+    @Test public void resolvesLegacyAndOrganizedGalleryPathsWithoutMovingExistingImages() throws Exception {
+        File root = folder.newFolder("snapshots");
+        File legacy = new File(root, "snapshot_existing.jpg");
+        assertEquals(legacy, SnapshotStore.resolveStoredFile(root, "snapshot_existing.jpg"));
+        File organized = new File(root, "camera_registered-1/2026-10-11/snapshot_new.jpg");
+        assertEquals(organized, SnapshotStore.resolveStoredFile(root, "camera_registered-1/2026-10-11/snapshot_new.jpg"));
+    }
+
+    @Test public void rejectsStoredPathsThatCouldEscapeThePrivateGallery() throws Exception {
+        File root = folder.newFolder("snapshots");
+        for (String name : new String[]{"../snapshot_secret.jpg", "/snapshot_secret.jpg", "camera_x/../../snapshot_secret.jpg", "camera_x/2026-10-11/../snapshot_secret.jpg"}) {
+            try { SnapshotStore.resolveStoredFile(root, name); fail("Unsafe stored path accepted"); }
+            catch (Exception expected) { assertFalse(expected.getMessage().isEmpty()); }
+        }
+        File outside = folder.newFolder("outside");
+        Files.createSymbolicLink(new File(root, "camera_link").toPath(), outside.toPath());
+        try { SnapshotStore.resolveStoredFile(root, "camera_link/2026-10-11/snapshot_secret.jpg"); fail("Symlink escaped gallery"); }
+        catch (Exception expected) { assertFalse(expected.getMessage().isEmpty()); }
+    }
 }
