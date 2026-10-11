@@ -94,7 +94,12 @@ public final class SmokeInstrumentation extends Instrumentation {
             enter("cam-preset-1", "fixture" + (char) 1 + "password"); eval("document.getElementById('cam-save-presets').click()");
             awaitScript("!document.getElementById('cam-save-presets').disabled && document.getElementById('cam-preset-1').value!==''", "Rejected native credential re-enables Save and retains edit");
             enter("cam-preset-1", "fixture-only-new-password"); eval("document.getElementById('cam-save-presets').click()");
+            try {
             awaitScript("!document.getElementById('cam-save-presets').disabled && document.getElementById('cam-preset-1').value===''&& JSON.parse(window.ReconCameras.state()).passwordPresets.some(p=>p.id==='preset-1'&&p.configured)", "Second Settings Save replaces preset after failed edit");
+            } catch (AssertionError failed) {
+                String detail = eval("JSON.stringify({saveDisabled:document.getElementById('cam-save-presets').disabled,editedPasswordLength:document.getElementById('cam-preset-1').value.length,usernameConfigured:JSON.parse(window.ReconCameras.state()).usernameConfigured,presetConfigured:JSON.parse(window.ReconCameras.state()).passwordPresets[0].configured,notice:document.getElementById('cam-status-text').textContent})");
+                throw new AssertionError("Second Settings Save failed; non-secret diagnostic: " + detail, failed);
+            }
             require(eval("!window.ReconCameras.state().includes('fixture-only-new-password') && document.getElementById('cam-preset-1').value===''").equals("true"), "Saved password remains hidden from UI and bridge state");
             eval("document.querySelector('.nav button[data-view=\"cameras\"]').click()");
             require(eval("!!document.getElementById('cam-batch-start') && !!document.getElementById('cam-batch-stop') && !!document.getElementById('cam-batch-export')").equals("true"), "Automatic manager controls are available without starting connections");
