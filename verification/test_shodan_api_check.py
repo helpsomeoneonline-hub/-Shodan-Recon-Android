@@ -97,7 +97,7 @@ class ShodanVerificationTests(unittest.TestCase):
         self.assertEqual(["1"], params["page"])
         self.assertEqual([checker.DEFAULT_QUERY], params["query"])
         self.assertEqual([checker.SEARCH_FIELDS], params["fields"])
-        self.assertEqual(["true"], params["minify"])
+        self.assertEqual(["false"], params["minify"])
 
     def test_missing_secret_reports_skipped_without_network(self):
         fixture = FakeFactory([])
