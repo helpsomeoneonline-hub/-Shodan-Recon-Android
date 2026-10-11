@@ -195,7 +195,7 @@ test('selected IP scanning requires explicit scope authorization and omits publi
   ui.element('scan-authorized').checked = true; ui.input('shodan-delay', 2000); ui.click('start-search');
   const config = JSON.parse(ui.callsTo('scanAuthorized')[0].args[0]);
   assert.deepEqual(config.ips, ['192.168.1.2', '10.0.0.3']);
-  assert.equal(config.authorized, true); assert.equal(config.delayMs, 2000); assert.equal(config.workers, 5);
+  assert.equal(config.authorized, true); assert.equal(config.delayMs, 2000); assert.equal(config.workers, 20);
 });
 
 test('CSV export neutralizes spreadsheet formula prefixes and quotes fields', () => {
