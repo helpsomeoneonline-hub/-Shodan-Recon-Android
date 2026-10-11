@@ -97,9 +97,11 @@ $('save-key').onclick=()=>N.setApiKey($('api-key').value.trim());$('delete-key')
 $('export-results').onclick=()=>{if(!state.results.length)return notify('No results to export');N.exportCsv(csv())};
 $('open-web-camera').onclick=()=>N.openHttpCamera($('web-camera-url').value.trim(),false,$('camera-channel').value);$('open-web-snapshot').onclick=()=>N.openHttpCamera($('web-camera-url').value.trim(),true,$('camera-channel').value);
 $('open-rtsp').onclick=()=>N.openRTSP($('rtsp-url').value.trim());$('refresh-device').onclick=refreshEnvironment;
-$('erase-state').onclick=()=>{if(!confirm('Remove profiles, IP lists, favorites, saved settings and history? API key will be retained.'))return;stopSearch();state=JSON.parse(JSON.stringify(defaults));persist();window.addEventListener('error',e=>{try{N.reportJavascriptError('dashboard',e.lineno||0)}catch(_){}});
-window.addEventListener('unhandledrejection',()=>{try{N.reportJavascriptError('promise',0)}catch(_){}});
-restoreSettings();renderProfiles();renderHistory();renderIPBook();renderResults();notify('Workspace cleared')};
+$('erase-state').onclick=()=>{if(!confirm('Remove profiles, IP lists, favorites, saved settings and history? API key will be retained.'))return;stopSearch();state=JSON.parse(JSON.stringify(defaults));persist();restoreSettings();renderProfiles();renderHistory();renderIPBook();renderResults();notify('Workspace cleared')};
+if(typeof window.addEventListener==='function'){
+  window.addEventListener('error',e=>{try{N.reportJavascriptError('dashboard',e.lineno||0)}catch(_){}});
+  window.addEventListener('unhandledrejection',()=>{try{N.reportJavascriptError('promise',0)}catch(_){}});
+}
 restoreSettings();renderProfiles();renderHistory();renderIPBook();renderResults();modeUI(state.activeMode||'shodan');showView(state.activeView||'discover');refreshEnvironment();$('api-chip').textContent=N.hasApiKey()?'Key saved':'No key';log('Mobile app ready. You control when network requests begin.');setInterval(refreshEnvironment,20000);
 })();
 </script><script src="cameras.js"></script></body></html>
