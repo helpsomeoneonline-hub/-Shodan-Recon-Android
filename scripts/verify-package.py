@@ -27,8 +27,14 @@ for path in Path('app').rglob('*'):
     if path.is_file() and 'build' not in path.parts and path.suffix in {'.java', '.kt', '.xml', '.html', '.js', '.gradle'}:
         no_embedded_key(path.read_text(encoding='utf-8'), path)
 for path in Path('.github/workflows').glob('*.y*ml'):
-    if re.search(r'secrets\s*(?:\.\s*SHODAN_API_KEY|\[\s*[\"\']SHODAN_API_KEY)', path.read_text(), re.I):
-        raise SystemExit(f'{path} reads SHODAN_API_KEY; standalone builds must not receive that secret.')
+    workflow = path.read_text()
+    if re.search(r'secrets\s*(?:\.\s*SHODAN_API_KEY|\[\s*[\"\']SHODAN_API_KEY)', workflow, re.I):
+        # A separate account-validation job may use the explicitly provided secret;
+        # it never builds, downloads or uploads an APK. Application builds stay secret-free.
+        if path.name != 'shodan-api-check.yml' or 'verification/shodan_api_check.py' not in workflow:
+            raise SystemExit(f'{path} reads SHODAN_API_KEY; standalone builds must not receive that secret.')
+        if re.search(r'gradle|assembleDebug|apksigner|upload-artifact|download-artifact', workflow, re.I):
+            raise SystemExit('The isolated Shodan check must not build or exchange application artifacts.')
 
 manifest = ET.parse('app/src/main/AndroidManifest.xml').getroot()
 android = '{http://schemas.android.com/apk/res/android}'

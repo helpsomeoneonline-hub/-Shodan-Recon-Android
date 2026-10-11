@@ -1,0 +1,22 @@
+name: Verify live Shodan account and search
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/shodan-api-check.yml'
+      - 'verification/**'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test verification redaction and request boundaries
+        run: python3 -m unittest discover -s verification -p 'test_*.py' -v
+      - name: Verify account and one default-query page
+        env:
+          SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+        run: python3 verification/shodan_api_check.py

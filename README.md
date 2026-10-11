@@ -72,6 +72,6 @@ before updating: earlier Actions used ephemeral signing keys, so an in-place
 update may be impossible without the original private key. Export data before
 any uninstall. The committed development key is not a production release key.
 
-The repository `SHODAN_API_KEY` secret is never read by the workflow or embedded
-in the app. Enter your key in Settings; it is encrypted on your device.
+The repository `SHODAN_API_KEY` secret is never read by the APK build or embedded
+in the app. A separate account-check workflow uses it only for sanitized API verification. Enter your key in Settings; it is encrypted on your device.
 See [TESTING.md](TESTING.md) for physical-device checks and compatibility limits.

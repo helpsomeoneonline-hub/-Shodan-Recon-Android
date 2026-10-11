@@ -15,11 +15,16 @@ if [[ ! -f "$SMOKE_PLATFORM" ]]; then
   SMOKE_PLATFORM=$(python3 -c 'import os,pathlib; p=pathlib.Path(os.environ.get("ANDROID_HOME") or os.environ["ANDROID_SDK_ROOT"],"platforms"); print(sorted(p.glob("*/android.jar"))[-1])')
 fi
 javac -source 17 -target 17 -classpath "$SMOKE_PLATFORM" -d smoke-build/classes smoke/SmokeInstrumentation.java
-mapfile -t SMOKE_CLASSES < <(rg --files smoke-build/classes -g '*.class')
+mapfile -t SMOKE_CLASSES < <(python3 -c 'from pathlib import Path; print("\n".join(str(p) for p in Path("smoke-build/classes").rglob("*.class")))')
+if [[ "${#SMOKE_CLASSES[@]}" -eq 0 ]]; then
+  echo 'No instrumentation classes were generated.'
+  exit 1
+fi
 "$SMOKE_TOOLS/d8" --lib "$SMOKE_PLATFORM" --min-api 26 --output smoke-build/dex "${SMOKE_CLASSES[@]}"
 "$SMOKE_TOOLS/aapt2" link --manifest smoke/AndroidManifest.xml -I "$SMOKE_PLATFORM" -o smoke-build/harness-unsigned.apk
 python3 -c 'import zipfile; z=zipfile.ZipFile("smoke-build/harness-unsigned.apk","a"); z.write("smoke-build/dex/classes.dex","classes.dex"); z.close()'
-"$SMOKE_TOOLS/apksigner" sign --ks app/development-debug.keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out smoke-build/harness.apk smoke-build/harness-unsigned.apk
+"$SMOKE_TOOLS/zipalign" -f 4 smoke-build/harness-unsigned.apk smoke-build/harness-aligned.apk
+"$SMOKE_TOOLS/apksigner" sign --ks app/development-debug.keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out smoke-build/harness.apk smoke-build/harness-aligned.apk
 adb install -r -t smoke-apk/app-debug.apk
 adb install -r -t smoke-build/harness.apk
 adb logcat -c
