@@ -85,7 +85,7 @@ final class DiagnosticLog {
     synchronized String text() {
         String header = "Shodan Recon diagnostic report\n"
                 + "Android SDK " + Build.VERSION.SDK_INT + "\n"
-                + "App version 1.2 (diagnostics)\n"
+                + "App version 1.3.0 (diagnostics)\n"
                 + "No keys, passwords, full URLs, camera images or target IPs are collected.\n"
                 + "Events are stored only on this device until you export them.\n\n";
         try { return header + new String(readBytes(MAX_BYTES + 100), StandardCharsets.UTF_8); }

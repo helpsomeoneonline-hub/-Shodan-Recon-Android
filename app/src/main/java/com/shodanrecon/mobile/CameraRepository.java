@@ -22,10 +22,25 @@ import javax.crypto.spec.GCMParameterSpec;
 /** Registered cameras are deliberately separate from Shodan discovery and scan results. */
 public final class CameraRepository {
     private static final String ALIAS = "shodan_recon_device_credentials_v1";
+    private static final String SHARED_USERNAME = "sharedUsername";
+    private static final int PRESET_COUNT = 6;
     private final SharedPreferences prefs;
+    private final CredentialCodec codec;
+
+    /** Injectable only for local repository tests; production always uses Android Keystore. */
+    interface CredentialCodec {
+        String encrypt(String value) throws Exception;
+        String decrypt(String value) throws Exception;
+    }
 
     public CameraRepository(Context context) {
         prefs = context.getApplicationContext().getSharedPreferences("recon_cameras_v1", Context.MODE_PRIVATE);
+        codec = null;
+    }
+
+    CameraRepository(SharedPreferences preferences, CredentialCodec credentialCodec) {
+        prefs = preferences;
+        codec = credentialCodec;
     }
 
     private JSONObject data() throws Exception {
@@ -53,10 +68,23 @@ public final class CameraRepository {
     /** Secrets may only be read by native connection code; never expose this through JavaScript. */
     public synchronized JSONObject credential(String id) throws Exception {
         if (id == null || id.isEmpty()) return null;
-        JSONObject records = data().optJSONObject("credentials");
+        return credential(data(), id);
+    }
+
+    private JSONObject credential(JSONObject source, String id) throws Exception {
+        JSONObject records = source.optJSONObject("credentials");
         if (records == null || !records.has(id)) return null;
         try { return new JSONObject(decrypt(records.getString(id))); }
         catch (Exception e) { throw new Exception("The saved device credential cannot be decrypted. Re-enter it in Credentials."); }
+    }
+
+    private static boolean presetId(String id) {
+        return id != null && id.matches("preset-[1-6]");
+    }
+
+    private String sharedUsername(JSONObject source) throws Exception {
+        if (!source.has(SHARED_USERNAME)) return "";
+        return new JSONObject(decrypt(source.getString(SHARED_USERNAME))).optString("username");
     }
 
     public synchronized JSONObject state() throws Exception {
@@ -71,7 +99,7 @@ public final class CameraRepository {
                 String id = keys.next();
                 JSONObject item = new JSONObject().put("id", id);
                 try {
-                    JSONObject secret = credential(id);
+                    JSONObject secret = credential(source, id);
                     item.put("name", secret.optString("name", "Device credential"));
                     item.put("hasPassword", !secret.optString("password").isEmpty());
                 } catch (Exception e) {
@@ -81,8 +109,141 @@ public final class CameraRepository {
             }
         }
         result.put("credentials", credentials);
+        JSONArray presets = new JSONArray();
+        for (int i = 1; i <= PRESET_COUNT; i++) {
+            String id = "preset-" + i;
+            JSONObject item = new JSONObject().put("id", id).put("name", "Password preset " + i)
+                    .put("configured", false).put("hasPassword", false).put("unavailable", false);
+            if (records != null && records.has(id)) {
+                try {
+                    JSONObject secret = credential(source, id);
+                    boolean configured = !secret.optString("username").isEmpty() && !secret.optString("password").isEmpty();
+                    item.put("configured", configured).put("hasPassword", configured);
+                } catch (Exception e) { item.put("unavailable", true); }
+            }
+            presets.put(item);
+        }
+        result.put("passwordPresets", presets).put("sharedUsername", "")
+                .put("usernameConfigured", false).put("usernameUnavailable", false);
+        try {
+            String username = sharedUsername(source);
+            result.put("sharedUsername", username).put("usernameConfigured", !username.isEmpty());
+        } catch (Exception e) { result.put("usernameUnavailable", true); }
         result.put("history", source.optJSONArray("history") == null ? new JSONArray() : source.getJSONArray("history"));
         return result;
+    }
+
+    private static void validateCredential(String username, String password) throws Exception {
+        if (username.isEmpty() || password.isEmpty()) throw new Exception("Enter the device username and password.");
+        validateUsername(username);
+        if (password.length() > 1024 || containsControl(password))
+            throw new Exception("Device credentials are too long or contain unsupported control characters.");
+    }
+
+    private static void validateUsername(String username) throws Exception {
+        if (username.isEmpty() || username.length() > 256 || username.contains(":") || containsControl(username))
+            throw new Exception("Enter a username of at most 256 characters without a colon or control characters.");
+    }
+
+    private static boolean containsControl(String value) {
+        for (int i = 0; i < value.length(); i++) if (Character.isISOControl(value.charAt(i))) return true;
+        return false;
+    }
+
+    /** One commit updates the shared username, fixed presets, and deleted-preset assignments together. */
+    public synchronized void savePresets(JSONObject input) throws Exception {
+        JSONObject source = data();
+        JSONObject records = source.optJSONObject("credentials");
+        if (records == null) records = new JSONObject();
+        JSONObject updates = new JSONObject();
+        JSONArray supplied = input.optJSONArray("presets");
+        if (input.has("presets") && supplied == null) throw new Exception("Password presets must be a list.");
+        if (supplied != null) {
+            if (supplied.length() > PRESET_COUNT) throw new Exception("There are exactly six password presets.");
+            for (int i = 0; i < supplied.length(); i++) {
+                JSONObject update = supplied.optJSONObject(i);
+                if (update == null) throw new Exception("Invalid password preset.");
+                String id = update.optString("id");
+                if (!presetId(id) || updates.has(id)) throw new Exception("Select each of the six password presets at most once.");
+                updates.put(id, update);
+            }
+        }
+        String enteredUsername = input.optString("username", "");
+        if (!enteredUsername.isEmpty()) validateUsername(enteredUsername);
+        if (input.optBoolean("deleteUsername")) {
+            if (!enteredUsername.isEmpty()) throw new Exception("Clear the username field before deleting saved preset credentials.");
+            for (int i = 1; i <= PRESET_COUNT; i++) {
+                String id = "preset-" + i;
+                JSONObject update = updates.optJSONObject(id);
+                if (update != null && !update.optString("password").isEmpty())
+                    throw new Exception("Do not enter new passwords when deleting saved preset credentials.");
+                records.remove(id);
+                unassign(source, id);
+            }
+            source.remove(SHARED_USERNAME);
+            source.put("credentials", records);
+            persist(source);
+            return;
+        }
+        String username = enteredUsername;
+        if (username.isEmpty()) {
+            try { username = sharedUsername(source); }
+            catch (Exception ignored) { /* Preserve unavailable ciphertext until explicitly replaced or deleted. */ }
+        }
+        JSONObject replacements = new JSONObject();
+        for (int i = 1; i <= PRESET_COUNT; i++) {
+            String id = "preset-" + i;
+            JSONObject update = updates.optJSONObject(id);
+            if (update != null && update.optBoolean("delete")) {
+                if (!update.optString("password").isEmpty()) throw new Exception("A password preset cannot be replaced and deleted together.");
+                records.remove(id);
+                unassign(source, id);
+                continue;
+            }
+            String password = update == null ? "" : update.optString("password", "");
+            JSONObject old = null;
+            if (records.has(id)) {
+                try { old = credential(source, id); }
+                catch (Exception ignored) { /* A new password can replace an unusable saved credential. */ }
+            }
+            if (password.isEmpty()) {
+                if (old == null) continue;
+                password = old.optString("password");
+                if (username.isEmpty() || username.equals(old.optString("username"))) continue;
+            }
+            validateCredential(username, password);
+            JSONObject secret = new JSONObject().put("id", id).put("name", "Password preset " + i)
+                    .put("username", username).put("password", password);
+            replacements.put(id, secret);
+        }
+        // Validate every resulting secret before encrypting or committing any configuration changes.
+        java.util.List<String> passwords = knownPasswords(source);
+        java.util.Iterator<String> replacementIds = replacements.keys();
+        while (replacementIds.hasNext()) passwords.add(replacements.getJSONObject(replacementIds.next()).getString("password"));
+        JSONArray cameras = source.optJSONArray("cameras");
+        if (cameras != null) for (int i = 0; i < cameras.length(); i++) {
+            JSONObject camera = cameras.getJSONObject(i);
+            JSONObject replacement = replacements.optJSONObject(camera.optString("credentialId"));
+            if (replacement != null) validateSecretFreePaths(camera, replacement);
+            validateKnownPasswords(camera, passwords);
+        }
+        replacementIds = replacements.keys();
+        while (replacementIds.hasNext()) {
+            String id = replacementIds.next();
+            records.put(id, encrypt(replacements.getJSONObject(id).toString()));
+        }
+        if (!enteredUsername.isEmpty())
+            source.put(SHARED_USERNAME, encrypt(new JSONObject().put("username", enteredUsername).toString()));
+        source.put("credentials", records);
+        persist(source);
+    }
+
+    private static void unassign(JSONObject source, String id) throws Exception {
+        JSONArray cameras = source.optJSONArray("cameras");
+        if (cameras != null) for (int i = 0; i < cameras.length(); i++) {
+            JSONObject camera = cameras.getJSONObject(i);
+            if (camera.optString("credentialId").equals(id)) camera.put("credentialId", "");
+        }
     }
 
     private static String text(JSONObject source, String key, String fallback, int limit) throws Exception {
@@ -164,6 +325,13 @@ public final class CameraRepository {
     }
 
     public synchronized void saveCredential(JSONObject input) throws Exception {
+        // Keep the original bridge command compatible without permitting per-preset usernames.
+        if (presetId(input.optString("id"))) {
+            savePresets(new JSONObject().put("username", input.optString("username", ""))
+                    .put("presets", new JSONArray().put(new JSONObject().put("id", input.getString("id"))
+                            .put("password", input.optString("password", "")))));
+            return;
+        }
         JSONObject source = data();
         JSONObject records = source.optJSONObject("credentials");
         if (records == null) records = new JSONObject();
@@ -179,9 +347,7 @@ public final class CameraRepository {
         String password = input.optString("password", "");
         if (username.isEmpty() && old != null) username = old.optString("username");
         if (password.isEmpty() && old != null) password = old.optString("password");
-        if (username.isEmpty() || password.isEmpty()) throw new Exception("Enter the device username and password.");
-        if (username.length() > 256 || password.length() > 1024 || username.contains("\r") || username.contains("\n") || username.contains(":"))
-            throw new Exception("Device credentials are too long or have an unsupported username.");
+        validateCredential(username, password);
         if (!records.has(id) && records.length() >= 500) throw new Exception("Credential limit reached (500).");
         JSONObject secret = new JSONObject().put("id", id).put("name", text(input, "name", "Device credential", 100))
                 .put("username", username).put("password", password);
@@ -206,11 +372,7 @@ public final class CameraRepository {
         JSONObject source = data();
         JSONObject records = source.optJSONObject("credentials");
         if (records != null) records.remove(id);
-        JSONArray cameras = source.optJSONArray("cameras");
-        if (cameras != null) for (int i = 0; i < cameras.length(); i++) {
-            JSONObject camera = cameras.getJSONObject(i);
-            if (camera.optString("credentialId").equals(id)) camera.put("credentialId", "");
-        }
+        unassign(source, id);
         persist(source);
     }
 
@@ -253,13 +415,14 @@ public final class CameraRepository {
         JSONObject validation = new JSONObject(camera.toString()).put("username", credential.optString("username"))
                 .put("password", credential.optString("password"));
         for (String field : new String[]{"httpPath", "snapshotPath", "mjpegPath", "hlsPath"}) {
-            if (!camera.optString(field).isEmpty()) CameraUrls.url(validation, camera.optString(field), 101);
+            String path = camera.optString(field);
+            if (!path.isEmpty()) for (int channel : validationChannels(camera, path)) CameraUrls.url(validation, path, channel);
         }
         String rtsp = camera.optString("rtspPath");
         if (!rtsp.isEmpty()) {
             validation.put("scheme", "http").put("port", camera.optInt("rtspPort", 554));
             if (rtsp.startsWith("rtsp://")) rtsp = "http://" + rtsp.substring(7);
-            CameraUrls.url(validation, rtsp, 101);
+            for (int channel : validationChannels(camera, rtsp)) CameraUrls.url(validation, rtsp, channel);
         }
         String password = credential.optString("password");
         if (!password.isEmpty() && (camera.optString("name").contains(password) || camera.optString("host").contains(password)))
@@ -283,6 +446,7 @@ public final class CameraRepository {
     }
 
     private static void validateKnownPasswords(JSONObject camera, java.util.List<String> passwords) throws Exception {
+        if (passwords.isEmpty()) return;
         // An unselected saved password must not be smuggled into a URL under an arbitrary query key.
         for (String field : new String[]{"host", "name", "httpPath", "snapshotPath", "mjpegPath", "hlsPath", "rtspPath"}) {
             String value = camera.optString(field);
@@ -291,13 +455,45 @@ public final class CameraRepository {
             catch (Exception e) { throw new Exception("Camera path encoding is invalid."); }
             for (String password : passwords) if (value.contains(password) || decoded.contains(password))
                 throw new Exception("Remove the saved password from the camera configuration before saving or exporting.");
+            if (!field.endsWith("Path") || value.isEmpty()) continue;
+            JSONObject origin = camera;
+            if (field.equals("rtspPath")) {
+                origin = new JSONObject(camera.toString()).put("scheme", "http").put("port", camera.optInt("rtspPort", 554));
+                if (value.startsWith("rtsp://")) value = "http://" + value.substring(7);
+            }
+            for (int channel : validationChannels(camera, value)) {
+                okhttp3.HttpUrl resolved = okhttp3.HttpUrl.get(CameraUrls.url(origin, value, channel));
+                // A numeric password coinciding with an origin port is harmless; inspect the request path/query only.
+                String path = resolved.encodedPath() + (resolved.encodedQuery() == null ? "" : "?" + resolved.encodedQuery());
+                String expanded = java.net.URLDecoder.decode(path.replace("+", "%2B"), "UTF-8");
+                for (String password : passwords) if (path.contains(password) || expanded.contains(password))
+                    throw new Exception("A camera URL template expands to a saved password. Change that path, channel or password before saving or exporting.");
+            }
         }
+    }
+
+    private static java.util.List<Integer> validationChannels(JSONObject camera, String path) {
+        java.util.ArrayList<Integer> channels = new java.util.ArrayList<>();
+        JSONArray configured = camera.optJSONArray("channels");
+        if (path.contains("{channel}") && configured != null) {
+            for (int i = 0; i < configured.length(); i++) channels.add(configured.optInt(i, 101));
+        }
+        if (channels.isEmpty()) channels.add(101);
+        return channels;
     }
 
     public synchronized String sanitize(String message) {
         String safe = message == null ? "Camera operation failed." : message;
         try {
-            JSONObject records = data().optJSONObject("credentials");
+            JSONObject source = data();
+            try {
+                String username = sharedUsername(source);
+                if (!username.isEmpty()) {
+                    safe = safe.replace(username, "[redacted]");
+                    safe = safe.replace(java.net.URLEncoder.encode(username, "UTF-8"), "[redacted]");
+                }
+            } catch (Exception ignored) {}
+            JSONObject records = source.optJSONObject("credentials");
             if (records != null) {
                 java.util.Iterator<String> keys = records.keys();
                 while (keys.hasNext()) {
@@ -342,26 +538,46 @@ public final class CameraRepository {
         source.put("cameras", cameras); persist(source);
     }
 
-    private SecretKey key() throws Exception {
+    private SecretKey key(String alias, boolean create) throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
-        if (store.containsAlias(ALIAS)) return ((KeyStore.SecretKeyEntry) store.getEntry(ALIAS, null)).getSecretKey();
+        if (store.containsAlias(alias)) return ((KeyStore.SecretKeyEntry) store.getEntry(alias, null)).getSecretKey();
+        if (!create) throw new Exception("The saved credential encryption key is unavailable.");
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-        generator.init(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+        generator.init(new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setRandomizedEncryptionRequired(true).build());
         return generator.generateKey();
     }
 
     private String encrypt(String value) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, key());
-        return Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP) + "." + Base64.encodeToString(cipher.doFinal(value.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
+        if (codec != null) return codec.encrypt(value);
+        String alias = prefs.getString("credential_key_alias", ALIAS);
+        if (alias == null || !alias.matches("shodan_recon_device_credentials_[A-Za-z0-9_]{1,100}")) alias = ALIAS;
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        try { cipher.init(Cipher.ENCRYPT_MODE, key(alias, true)); }
+        catch (java.security.GeneralSecurityException unavailable) {
+            // Preserve old aliases/ciphertext. An invalidated key must not prevent explicit replacement.
+            alias = ALIAS + "_recovery_" + UUID.randomUUID().toString().replace("-", "");
+            cipher.init(Cipher.ENCRYPT_MODE, key(alias, true));
+            if (!prefs.edit().putString("credential_key_alias", alias).commit())
+                throw new Exception("Cannot save credential encryption settings.");
+        }
+        return "v2." + alias + "." + Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP) + "."
+                + Base64.encodeToString(cipher.doFinal(value.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
     }
 
     private String decrypt(String value) throws Exception {
+        if (codec != null) return codec.decrypt(value);
         String[] parts = value.split("\\.", -1);
-        if (parts.length != 2) throw new Exception("Invalid encrypted credential.");
+        String alias = ALIAS;
+        int offset = 0;
+        if (parts.length == 4 && "v2".equals(parts[0])) {
+            alias = parts[1]; offset = 2;
+            if (!alias.matches("shodan_recon_device_credentials_[A-Za-z0-9_]{1,100}"))
+                throw new Exception("Invalid credential encryption key.");
+        } else if (parts.length != 2) throw new Exception("Invalid encrypted credential.");
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)));
-        return new String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), StandardCharsets.UTF_8);
+        cipher.init(Cipher.DECRYPT_MODE, key(alias, false), new GCMParameterSpec(128, Base64.decode(parts[offset], Base64.NO_WRAP)));
+        return new String(cipher.doFinal(Base64.decode(parts[offset + 1], Base64.NO_WRAP)), StandardCharsets.UTF_8);
     }
 }

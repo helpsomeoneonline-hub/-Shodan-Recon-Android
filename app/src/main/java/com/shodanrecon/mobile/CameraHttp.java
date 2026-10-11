@@ -36,6 +36,12 @@ import okio.Okio;
 
 /** Scoped HTTP transport. Selected credentials are sent only after an authentication challenge. */
 public final class CameraHttp {
+    /** A rejected protocol response retains its code without exposing a request URL. */
+    static final class StatusException extends IOException {
+        final int statusCode;
+        StatusException(int statusCode, String message) { super(message); this.statusCode = statusCode; }
+    }
+
     private final JSONObject camera;
     private final HttpUrl origin;
     private final String username;
@@ -68,7 +74,7 @@ public final class CameraHttp {
                     if (attempts >= 3) return null;
                     Challenge challenge = preferredChallenge(response.headers("WWW-Authenticate"));
                     if (challenge == null)
-                        throw new IOException("The camera's authentication method is unsupported. Use HTTP Basic or Digest with qop=auth.");
+                        throw new StatusException(response.code(), "HTTP " + response.code() + ": The camera's authentication method is unsupported. Use HTTP Basic or Digest with qop=auth.");
                     // A second retry is allowed only for an explicitly stale Digest nonce.
                     if (response.request().header("Authorization") != null
                             && (!challenge.scheme.equals("Digest") || !"true".equalsIgnoreCase(challenge.parameters.get("stale"))))
@@ -92,8 +98,9 @@ public final class CameraHttp {
                         if (cancelled.get()) { call.cancel(); throw new IOException("Camera task cancelled."); }
                         Response response = chain.proceed(chain.request());
                         if (response.isRedirect()) {
+                            int code = response.code();
                             response.close();
-                            throw new IOException("Camera redirected the request. Update the saved scheme, port or path; redirects are disabled.");
+                            throw new StatusException(code, "HTTP " + code + ": Camera redirected the request. Update the saved scheme, port or path; redirects are disabled.");
                         }
                         ResponseBody body = response.body();
                         if (body == null) { active.remove(call); return response; }
@@ -121,6 +128,7 @@ public final class CameraHttp {
             return client.newCall(new Request.Builder().url(url).header("Accept", "*/*").get().build()).execute();
         } catch (IOException ex) {
             if (cancelled.get()) throw new IOException("Camera task cancelled.");
+            if (ex instanceof StatusException) throw ex;
             if (ex instanceof SocketTimeoutException)
                 throw new IOException("Camera connection timed out. Check the address, port, network and path.");
             if (ex instanceof UnknownHostException)

@@ -43,6 +43,8 @@ jobs:
         run: |
           node scripts/check-dashboard.mjs
           node scripts/test-dashboard.mjs
+          node scripts/test-camera-settings.mjs
+          node scripts/test-camera-batch-ui.mjs
           python3 scripts/verify-package.py
       - name: Test, lint and build debug APK
         run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
@@ -66,5 +68,66 @@ jobs:
           name: ShodanRecon-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 30
+      - name: Check out installed-version baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: update-baseline
+      - name: Build installed-version baseline APK
+        if: github.event_name == 'pull_request'
+        run: gradle --no-daemon -p update-baseline :app:assembleDebug
+      - name: Upload installed-version baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShodanRecon-update-baseline-apk
+          path: update-baseline/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+  smoke:
+    if: github.event_name == 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ShodanRecon-debug-apk
+          path: smoke-apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: ShodanRecon-update-baseline-apk
+          path: update-baseline-apk
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Verify in-place update, launch and rotation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash smoke/run.sh
+      - name: Upload emulator and update evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShodanRecon-emulator-smoke
+          path: smoke-results/
+          if-no-files-found: warn
           retention-days: 30
 

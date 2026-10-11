@@ -4,9 +4,11 @@
   const $ = id => document.getElementById(id);
   const escapeHtml = value => String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const storage = {read(key) { try { return sessionStorage.getItem(key); } catch (_) { return null; } }, write(key, value) { try { sessionStorage.setItem(key, value); } catch (_) {} }};
-  let state = {cameras: [], credentials: [], snapshots: [], history: [], storageBytes: 0, busy: false};
+  let state = {cameras: [], credentials: [], passwordPresets: [], snapshots: [], history: [], storageBytes: 0, busy: false, batch: {}};
   let selectedId = storage.read('camera-selected') || '', activeTab = storage.read('camera-tab') || 'devices';
-  let initialized = false, diagnostics = [], toastTimer, galleryPage = 0, thumbnailObserver;
+  let initialized = false, diagnostics = [], toastTimer, galleryPage = 0, thumbnailObserver, usernameDirty = false, presetSavePending = false, pendingCameraForm = null;
+  let batchSelection = new Set();
+  try { const saved = JSON.parse(storage.read('camera-batch-selection') || '[]'); if (Array.isArray(saved)) batchSelection = new Set(saved.map(String)); } catch (_) {}
   const thumbnailCache = new Map(), thumbnailRequested = new Set(), GALLERY_PAGE_SIZE = 48;
   const bridge = () => window.ReconCameras;
   function notify(message) {
@@ -28,11 +30,16 @@
   }
   function applyState(data) {
     if (!data || !Array.isArray(data.cameras)) return;
+    const previousIds = new Set(state.cameras.map(camera => String(camera.id)));
     state = Object.assign({}, state, data);
-    for (const field of ['cameras', 'credentials', 'snapshots', 'history']) if (!Array.isArray(state[field])) state[field] = [];
+    for (const field of ['cameras', 'credentials', 'passwordPresets', 'snapshots', 'history']) if (!Array.isArray(state[field])) state[field] = [];
+    batchSelection = new Set([...batchSelection].filter(id => state.cameras.some(camera => String(camera.id) === id)));
+    const savedCamera = pendingCameraForm && state.cameras.find(camera => pendingCameraForm.id ? String(camera.id) === pendingCameraForm.id : !previousIds.has(String(camera.id)) && camera.host === pendingCameraForm.host && Number(camera.port) === pendingCameraForm.port);
+    if (savedCamera) { selectedId = String(savedCamera.id); pendingCameraForm = null; }
     if (!state.cameras.some(camera => String(camera.id) === selectedId)) selectedId = state.cameras.length ? String(state.cameras[0].id) : '';
     storage.write('camera-selected', selectedId);
-    renderCameras(); renderCredentials(); renderSnapshots(); renderHistory(); renderStorage(); renderBusy();
+    renderCameras(); renderCredentials(); renderSnapshots(); renderHistory(); renderStorage(); renderBatch(); renderBusy();
+    if (savedCamera) loadCameraForm(savedCamera);
   }
   function refresh() {
     if (!bridge()) return;
@@ -65,10 +72,10 @@
             ${field('IP address or hostname', 'cam-host', '', 'required autocapitalize="none" spellcheck="false" placeholder="192.168.1.20"')}
             <div class="two"><div class="field"><label for="cam-scheme">Web protocol</label><select id="cam-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div>${field('Web port', 'cam-port', '80', 'required type="number" min="1" max="65535"')}</div>
             <div class="field"><label for="cam-credential">Saved credential</label><select id="cam-credential"><option value="">No credential</option></select></div>
-            <p class="desc">Choose a saved credential manually. Create or edit it in the Credentials tab.</p>
+            <p class="desc">Choose one saved password preset for this camera. Configure the shared username and six presets in Settings.</p>
             ${field('Camera web interface path', 'cam-http-path', '/', 'placeholder="/" autocapitalize="none" spellcheck="false"')}
             ${field('Snapshot URL template', 'cam-snapshot-path', '/ISAPI/Streaming/channels/{channel}/picture', 'required autocapitalize="none" spellcheck="false"')}
-            <p class="desc">Use {channel} for channel selection, for example /ISAPI/Streaming/channels/{channel}/picture. A manual full URL must address this same camera. Keep passwords in Credentials.</p>
+            <p class="desc">Use {scheme}, {host}, {port} and {channel} to insert this camera's protocol, address, port and channel, for example {scheme}://{host}:{port}/ISAPI/Streaming/channels/{channel}/picture. A full URL must address this same camera. Keep passwords in Settings.</p>
             <details class="cam-advanced"><summary>Live stream paths</summary>
               ${field('MJPEG path (if available)', 'cam-mjpeg-path', '', 'placeholder="/video.mjpg" autocapitalize="none" spellcheck="false"')}
               ${field('RTSP path (if available)', 'cam-rtsp-path', '', 'placeholder="/Streaming/Channels/101" autocapitalize="none" spellcheck="false"')}
@@ -81,7 +88,14 @@
           <div class="line"></div><h2>Configuration transfer</h2><p>Import or export camera addresses, paths and channel selections. Credentials and passwords are excluded. Imported cameras must be authorized before connecting.</p>
           <div class="actions"><button class="btn ghost" id="cam-import-config">Import JSON</button><button class="btn ghost" id="cam-export-config">Export JSON</button></div>
         </section>
-        <section class="section"><h2>Connect and capture</h2>
+        <div class="cam-tools"><section class="section cam-batch-section"><h2>Automatic Camera Manager</h2>
+          <p>Select registered cameras in the list, then start. Each camera uses its assigned credential, checks its connection and captures its configured snapshot channels in sequence.</p>
+          <div class="actions"><button class="btn ghost" id="cam-batch-select-all">Select all cameras</button><button class="btn ghost" id="cam-batch-clear">Clear selection</button><span class="counter" id="cam-batch-selection-count">0 selected</span></div>
+          <div class="actions cam-batch-controls"><button class="btn primary fill" id="cam-batch-start">Start</button><button class="btn warn" id="cam-batch-stop" disabled>Stop</button></div>
+          <div class="cam-batch-live" role="status" aria-live="polite" aria-atomic="true"><p id="cam-batch-current">No batch started.</p><progress id="cam-batch-progress" max="1" value="0" aria-label="Camera batch progress"></progress><div class="cam-batch-metrics"><div><strong id="cam-batch-completed">0 / 0</strong><span>Completed</span></div><div><strong id="cam-batch-successes">0</strong><span>Successful connections</span></div><div><strong id="cam-batch-failures">0</strong><span>Failures</span></div><div><strong id="cam-batch-snapshots">0</strong><span>Snapshots saved</span></div></div><p id="cam-batch-summary"></p></div>
+          <div class="actions"><button class="btn ghost" id="cam-batch-export" disabled>Export checks CSV</button><button class="btn ghost" id="cam-batch-diagnostics">Diagnostic TXT</button></div>
+          <details class="cam-advanced"><summary>Completed camera checks</summary><div id="cam-batch-results" class="cam-history"></div></details>
+        </section><section class="section"><h2>Connect and capture</h2>
           <div class="field"><label for="cam-selected">Registered camera</label><select id="cam-selected"><option value="">Save a camera first</option></select></div>
           <div class="field"><label for="cam-method">Viewing method</label><select id="cam-method"><option value="http">HTTP / HTTPS interface</option><option value="snapshot">JPEG snapshot</option><option value="mjpeg">MJPEG live stream</option><option value="rtsp">RTSP live stream</option><option value="hls">HLS live stream</option></select></div>
           <p id="cam-method-help" class="desc"></p>
@@ -90,41 +104,41 @@
           <p>Capture uses the saved camera and its chosen credential. Select one channel for a single capture, or several for a batch.</p>
           <div class="actions"><button class="btn ghost" id="cam-select-all">Select all</button><button class="btn ghost" id="cam-select-none">Clear selection</button></div>
           <div class="cam-channels" id="cam-channels"></div>
+          <div class="two"><div class="field"><label for="cam-custom-channel">Additional channel</label><input class="input" id="cam-custom-channel" type="number" min="1" max="65535" placeholder="Channel number"></div><button class="btn ghost cam-channel-add" id="cam-add-channel">Add channel</button></div>
+          <div class="actions"><button class="btn ghost" id="cam-save-channels">Save channels for automatic capture</button></div>
           <div class="actions"><button class="btn primary fill cam-network-action" id="cam-capture">Capture selected</button><button class="btn ghost" id="cam-go-gallery">Gallery</button></div>
           <div class="line"></div><h2>Connection diagnostics</h2><div class="cam-diagnostics" id="cam-diagnostics" role="log">Save a camera, then test its connection. Network and authentication errors appear here.</div>
           <p>Basic and supported Digest authentication use your manually selected credential. HTTPS certificate errors are reported; camera access restrictions are respected.</p>
-        </section>
+        </section></div>
       </div></div>
       <div class="cam-pane" id="cam-pane-gallery"><section class="section"><h2>Snapshot gallery <span class="counter" id="cam-snapshot-count">0</span></h2>
         <div class="cam-gallery-toolbar"><div class="field"><label for="cam-snapshot-filter">Search snapshots</label><input class="input" id="cam-snapshot-filter" type="search" placeholder="Camera, IP, channel or capture date"></div><label class="cam-check"><input type="checkbox" id="cam-only-flagged">Show images flagged for review</label></div>
+        <div class="two"><div class="field"><label for="cam-gallery-camera">Camera address</label><select id="cam-gallery-camera"><option value="">All cameras</option></select></div><div class="field"><label for="cam-gallery-date">Capture date</label><input class="input" id="cam-gallery-date" type="date"></div></div>
+        <div class="actions"><button class="btn ghost" id="cam-gallery-clear-filters">Clear gallery filters</button></div>
         <div class="actions"><button class="btn warn" id="cam-delete-flagged">Delete flagged images</button><button class="btn ghost" id="cam-gallery-refresh">Refresh gallery</button></div>
         <p class="cam-storage" id="cam-storage"></p><div class="actions"><button class="btn ghost" id="cam-select-storage">Choose export folder</button></div>
         <p>Downloaded images stay in this app's gallery. Choose an Android folder for exports, or export an individual image to a location you select. Exact duplicate, empty and corrupted downloads are flagged for review.</p>
         <div class="cam-gallery" id="cam-gallery"></div><div class="actions" style="margin-top:14px"><button class="btn ghost" id="cam-gallery-previous">Previous</button><span class="counter" id="cam-gallery-page"></span><button class="btn ghost" id="cam-gallery-next">Next</button></div>
       </section></div>
-      <div class="cam-pane" id="cam-pane-credentials"><section class="section">
-        <h2>Six reusable credential presets</h2>
-        <p>Set one username and up to six password presets for cameras you manage. They are stored encrypted in Android Keystore. Assign one preset to each registered camera; no automatic password-list testing occurs.</p>
-        <div class="field"><label for="cam-preset-username">Shared username</label><input class="input" id="cam-preset-username" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Camera username"></div>
-        <div class="two">${Array.from({length:6},(_,i)=>'<div class="field"><label for="cam-preset-'+(i+1)+'">Password '+(i+1)+'</label><input class="input" id="cam-preset-'+(i+1)+'" type="password" autocomplete="new-password" placeholder="Leave empty to keep saved preset"><small id="cam-preset-status-'+(i+1)+'">Not saved</small></div>').join('')}</div>
-        <div class="actions"><button class="btn primary" id="cam-save-presets">Save entered presets</button></div>
-        <p class="desc">Leave a password field blank to keep its existing saved value. To remove a preset, delete it from Saved device credentials below. Select its credential in an authorized camera profile.</p>
-      </section><div class="cam-layout"><section class="section"><h2>Saved device credentials</h2><p class="cam-credential-note">Secrets are encrypted with Android Keystore. Camera profiles choose credentials individually. This app never tries passwords on Shodan results.</p><div id="cam-credential-list"></div></section>
-        <section class="section"><h2 id="cam-credential-heading">Add credential</h2><form id="cam-credential-form" autocomplete="off"><input type="hidden" id="cam-credential-id">
-          ${field('Credential name', 'cam-credential-name', '', 'required maxlength="100" placeholder="Entrance camera account"')}
-          ${field('Username', 'cam-credential-user', '', 'autocapitalize="none" spellcheck="false" autocomplete="off"')}
-          ${field('Password', 'cam-credential-password', '', 'type="password" autocomplete="new-password"')}
-          <p class="desc" id="cam-credential-edit-help">Enter the username and password assigned to your authorized camera.</p>
-          <div class="actions"><button class="btn primary fill" type="submit">Save encrypted credential</button><button class="btn ghost" id="cam-new-credential" type="button">New</button></div>
-        </form></section></div></div>
+      <div class="cam-pane" id="cam-pane-credentials"><section class="section"><h2>Camera credentials</h2><p>Configure one shared username and six password presets in Settings. Choose one configured preset in each camera profile. Existing credentials remain available to preserve your camera connections.</p><div class="actions"><button class="btn primary" id="cam-open-credential-settings">Manage six presets</button></div><div class="line"></div><h2>Saved credentials</h2><p class="cam-credential-note">Only configuration status is displayed. Secrets are encrypted with Android Keystore.</p><div id="cam-credential-list"></div></section></div>
       <div class="cam-pane" id="cam-pane-activity"><section class="section"><h2>Device history</h2><p>Connection tests, captures and device actions are stored locally. Passwords are never included.</p><div class="field"><label for="cam-history-filter">Filter device history</label><input class="input" id="cam-history-filter" type="search" placeholder="Camera, action or date"></div><div class="cam-history" id="cam-history"></div></section></div>`;
     document.querySelector('.app').appendChild(view);
-    bindActions(view); resetCameraForm(true); refresh(); restoreDraft(); showTab(activeTab);
+    const galleryView = $('view-gallery');
+    if (galleryView) { galleryView.appendChild($('cam-pane-gallery').firstElementChild); galleryView.classList.add('cam-workspace'); }
+    const settings = document.createElement('section'); settings.id = 'cam-preset-section'; settings.className = 'section';
+    settings.innerHTML = `<h2>Camera username and six password presets</h2><p>Enter the shared username once and save up to six passwords. Android Keystore encrypts saved credentials. Each registered camera uses only the preset you assign to it.</p><div class="field"><label for="cam-preset-username">Shared username</label><input class="input" id="cam-preset-username" maxlength="256" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Camera username"><small id="cam-username-status">Not configured</small></div><div class="two cam-preset-grid">${Array.from({length:6},(_,i)=>'<div class="field"><label for="cam-preset-'+(i+1)+'">Password preset '+(i+1)+'</label><input class="input" id="cam-preset-'+(i+1)+'" type="password" maxlength="1024" autocomplete="new-password" placeholder="Blank keeps saved password"><div class="cam-preset-meta"><small id="cam-preset-status-'+(i+1)+'">Not configured</small><button class="btn warn" type="button" id="cam-delete-preset-'+(i+1)+'" disabled>Delete preset '+(i+1)+'</button></div></div>').join('')}</div><div class="actions"><button class="btn primary" id="cam-save-presets">Save username and presets</button><button class="btn warn" id="cam-delete-all-presets">Delete saved username and presets</button></div><p class="desc">Blank fields keep existing saved values. Delete removes a saved preset without reinstalling. Saved passwords are never displayed. Existing camera assignments remain available until you change or delete them.</p>`;
+    const settingsLayout = document.querySelector('#view-settings .layout');
+    if (settingsLayout) settingsLayout.appendChild(settings); else view.appendChild(settings);
+    bindActions(view); resetCameraForm(true); refresh(); restoreDraft(); showTab(activeTab === 'gallery' && galleryView ? 'devices' : activeTab);
     if (document.querySelector('.nav [data-view="cameras"].active')) view.classList.add('active');
     if (!bridge()) { $('cam-status-text').textContent = 'Camera services require the Android app.'; }
   }
   function showTab(tab) {
     if (!['devices', 'gallery', 'credentials', 'activity'].includes(tab)) tab = 'devices';
+    if (tab === 'gallery' && $('view-gallery')) {
+      const nav = document.querySelector('.nav [data-view="gallery"]');
+      if (nav) { nav.click(); renderSnapshots(); return; }
+    }
     activeTab = tab; storage.write('camera-tab', tab);
     document.querySelectorAll('[data-camera-tab]').forEach(el => { const active = el.dataset.cameraTab === tab; el.classList.toggle('active', active); el.setAttribute('aria-selected', String(active)); });
     document.querySelectorAll('.cam-pane').forEach(el => el.classList.toggle('active', el.id === 'cam-pane-' + tab));
@@ -137,7 +151,10 @@
     const matching = state.cameras.filter(camera => cameraDisplay(camera).toLowerCase().includes(filter));
     for (const camera of matching) {
       const el = document.createElement('article'); el.className = 'cam-card' + (String(camera.id) === selectedId ? ' selected' : '');
-      el.innerHTML = '<h3>' + escapeHtml(camera.name || 'Camera') + '</h3><small>' + escapeHtml((camera.scheme || 'http') + '://' + (camera.host || '') + ':' + camera.port) + '</small><small>' + (camera.authorized ? 'Registered as authorized' : 'Authorization required before connecting') + '</small><div class="actions"><button class="btn primary use">Select</button><button class="btn ghost edit">Edit</button><button class="btn warn delete">Delete</button></div>';
+      const preset = state.credentials.find(credential => String(credential.id) === String(camera.credentialId));
+      el.innerHTML = '<label class="cam-check cam-batch-check"><input class="batch-select" type="checkbox"' + (batchSelection.has(String(camera.id)) ? ' checked' : '') + (!camera.authorized || state.busy ? ' disabled' : '') + '>Include in automatic checks</label><h3>' + escapeHtml(camera.name || 'Camera') + '</h3><small>' + escapeHtml((camera.scheme || 'http') + '://' + (camera.host || '') + ':' + camera.port) + '</small><small>' + (camera.authorized ? 'Registered as authorized' : 'Authorization required before connecting') + '</small><small>Credential: ' + escapeHtml(preset ? preset.name : camera.credentialId ? 'Unavailable saved credential' : 'No credential') + '</small><small>' + (Array.isArray(camera.channels) ? camera.channels.length : DEFAULT_CHANNELS.length) + ' configured snapshot channel(s) for automatic capture</small><div class="actions"><button class="btn primary use">Select</button><button class="btn ghost edit">Edit</button><button class="btn warn delete"' + (state.busy ? ' disabled' : '') + '>Delete</button></div>';
+      el.querySelector('.batch-select').onchange = event => { const id = String(camera.id); if (event.target.checked) batchSelection.add(id); else batchSelection.delete(id); rememberBatchSelection(); renderBatch(); };
+      el.querySelector('.batch-select').dataset.cameraId = String(camera.id);
       el.querySelector('.use').onclick = () => selectCamera(String(camera.id));
       el.querySelector('.edit').onclick = () => { loadCameraForm(camera); $('cam-form-heading').scrollIntoView({block: 'start', behavior: 'smooth'}); };
       el.querySelector('.delete').onclick = () => { if (confirm('Delete "' + (camera.name || camera.host) + '"? Saved snapshots will remain in the gallery.')) command('delete-camera', {id: camera.id}); };
@@ -160,7 +177,7 @@
     const camera = selectedCamera();
     let selected = DEFAULT_CHANNELS.slice(0, 1);
     try { const remembered = JSON.parse(storage.read('camera-channels-' + selectedId) || 'null'); if (Array.isArray(remembered)) selected = remembered; else if (camera && Array.isArray(camera.channels)) selected = camera.channels; } catch (_) {}
-    const channels = [...new Set([...DEFAULT_CHANNELS, ...(camera && Array.isArray(camera.channels) ? camera.channels : [])])];
+    const channels = [...new Set([...DEFAULT_CHANNELS, ...(camera && Array.isArray(camera.channels) ? camera.channels : []), ...selected])];
     $('cam-channels').innerHTML = channels.map(channel => '<label class="cam-check cam-channel"><input type="checkbox" value="' + Number(channel) + '"' + (selected.includes(Number(channel)) ? ' checked' : '') + '>' + Number(channel) + '</label>').join('');
     updateChannelCount();
   }
@@ -208,30 +225,43 @@
     const chosen = $('cam-credential').value, list = $('cam-credential-list');
     $('cam-credential').replaceChildren(new Option('No credential', '')); list.replaceChildren();
     for (const credential of state.credentials) {
-      $('cam-credential').add(new Option(credential.name || 'Credential', String(credential.id)));
+      $('cam-credential').add(new Option((credential.name || 'Credential') + (credential.unavailable ? ' (unavailable)' : ''), String(credential.id)));
       const el = document.createElement('div'); el.className = 'cam-card';
-      el.innerHTML = '<h3>' + escapeHtml(credential.name || 'Credential') + '</h3><small>' + (credential.hasPassword ? 'Password stored securely' : 'No saved password') + '</small><div class="actions"><button class="btn ghost edit">Edit</button><button class="btn warn delete">Delete</button></div>';
-      el.querySelector('.edit').onclick = () => { $('cam-credential-id').value = credential.id; $('cam-credential-name').value = credential.name || ''; $('cam-credential-user').value = ''; $('cam-credential-password').value = ''; $('cam-credential-heading').textContent = 'Edit credential'; $('cam-credential-edit-help').textContent = 'Saved secrets are not displayed. Leave username or password blank to retain its saved value.'; };
+      const legacy = !/^preset-[1-6]$/.test(String(credential.id));
+      el.innerHTML = '<h3>' + escapeHtml(credential.name || 'Credential') + '</h3><small>' + (credential.unavailable ? 'Saved credential unavailable; enter a replacement in Settings' : credential.hasPassword ? 'Password stored securely' : 'No saved password') + '</small><small>' + (legacy ? 'Existing credential · retained for current camera assignments. Enter its replacement in a password preset in Settings.' : 'Reusable password preset · edit in Settings') + '</small><div class="actions"><button class="btn ghost settings">Settings</button><button class="btn warn delete">Delete</button></div>';
+      el.querySelector('.settings').onclick = openCredentialSettings;
       el.querySelector('.delete').onclick = () => { const associated = state.cameras.filter(camera => String(camera.credentialId) === String(credential.id)).length; if (confirm('Delete this saved credential?' + (associated ? ' It is selected by ' + associated + ' camera profile(s); those cameras will need another credential.' : ''))) command('delete-credential', {id: credential.id}); };
       list.appendChild(el);
     }
     for (let i=1;i<=6;i++) {
-      const preset=state.credentials.find(c=>String(c.id)==='preset-'+i);
+      const preset=state.passwordPresets.find(c=>String(c.id)==='preset-'+i) || state.credentials.find(c=>String(c.id)==='preset-'+i);
       const status=$('cam-preset-status-'+i);
-      if(status) status.textContent=preset && preset.hasPassword?'Saved securely':'Not saved';
+      if(status) status.textContent=preset && preset.unavailable ? 'Unavailable · enter a replacement' : preset && (preset.configured || preset.hasPassword) ? 'Configured · saved securely' : 'Not configured';
+      $('cam-delete-preset-'+i).disabled = !(preset && (preset.configured || preset.hasPassword || preset.unavailable)) || presetSavePending || !!state.busy;
     }
+    if (!usernameDirty && !presetSavePending) $('cam-preset-username').value = state.sharedUsername || '';
+    $('cam-username-status').textContent = state.usernameUnavailable ? 'Saved username unavailable · enter a replacement' : state.usernameConfigured ? 'Shared username configured' : 'Shared username not configured';
+    $('cam-save-presets').disabled = presetSavePending || !!state.busy;
+    $('cam-delete-all-presets').disabled = presetSavePending || !!state.busy || !(state.usernameConfigured || state.usernameUnavailable || state.passwordPresets.some(preset => preset.configured || preset.unavailable));
     if (!state.credentials.length) list.innerHTML = '<div class="empty">No device credentials saved</div>';
     if (state.credentials.some(credential => String(credential.id) === chosen)) $('cam-credential').value = chosen;
   }
-  function resetCredentialForm() {
-    $('cam-credential-form').reset(); $('cam-credential-id').value = ''; $('cam-credential-heading').textContent = 'Add credential';
-    $('cam-credential-edit-help').textContent = 'Enter the username and password assigned to your authorized camera.';
-  }
+  function openCredentialSettings() { const nav = document.querySelector('.nav [data-view="settings"]'); if (nav) nav.click(); $('cam-preset-section').scrollIntoView({block: 'start', behavior: 'smooth'}); }
   function bytes(value) { const size = Number(value) || 0; return size < 1024 ? size + ' B' : size < 1024 * 1024 ? (size / 1024).toFixed(1) + ' KB' : (size / 1024 / 1024).toFixed(1) + ' MB'; }
   function captureTime(snapshot) { const value = snapshot.capturedAt || snapshot.timestamp; const date = new Date(value); return Number.isNaN(date.valueOf()) ? String(value || 'Unknown time') : date.toLocaleString(); }
+  function captureDate(snapshot) {
+    const date = new Date(snapshot.capturedAt || snapshot.timestamp);
+    if (Number.isNaN(date.valueOf())) return '';
+    return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
+  }
   function renderSnapshots() {
     const query = $('cam-snapshot-filter').value.toLowerCase(), flagged = $('cam-only-flagged').checked;
-    const matching = state.snapshots.filter(snapshot => (!flagged || snapshot.flagged) && (!query || [snapshot.cameraName,snapshot.ip,snapshot.channel,captureTime(snapshot),snapshot.capturedAt,snapshot.reason].join(' ').toLowerCase().includes(query)));
+    const cameraFilter = $('cam-gallery-camera'), selectedHost = cameraFilter.value, date = $('cam-gallery-date').value;
+    const hosts = [...new Set(state.snapshots.map(snapshot => String(snapshot.ip || snapshot.host || '')).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, {numeric:true}));
+    cameraFilter.replaceChildren(new Option('All cameras', ''));
+    for (const host of hosts) cameraFilter.add(new Option(host, host));
+    if (hosts.includes(selectedHost)) cameraFilter.value = selectedHost;
+    const matching = state.snapshots.filter(snapshot => (!flagged || snapshot.flagged) && (!cameraFilter.value || String(snapshot.ip || snapshot.host || '') === cameraFilter.value) && (!date || captureDate(snapshot) === date) && (!query || [snapshot.cameraName,snapshot.ip,snapshot.channel,captureTime(snapshot),snapshot.capturedAt,snapshot.reason].join(' ').toLowerCase().includes(query)));
     $('cam-snapshot-count').textContent = matching.length + ' / ' + state.snapshots.length;
     $('cam-delete-flagged').disabled = !!state.busy || !state.snapshots.some(snapshot => snapshot.flagged);
     const list = $('cam-gallery'); list.replaceChildren();
@@ -276,9 +306,53 @@
     }
     if (!matching.length) list.innerHTML = '<div class="empty">No matching device history</div>';
   }
+  function rememberBatchSelection() { storage.write('camera-batch-selection', JSON.stringify([...batchSelection])); }
+  function savedBatchRows() {
+    const batch = state.batch || {}, rows = Array.isArray(batch.results) ? batch.results.slice() : [];
+    if (Array.isArray(state.batchHistory)) for (const run of state.batchHistory) {
+      if (!run || (batch.runId && String(run.runId) === String(batch.runId))) continue;
+      if (Array.isArray(run.results)) rows.push(...run.results);
+      else if (run.cameraId) rows.push(run);
+    }
+    return rows;
+  }
+  function renderBatch() {
+    const batch = state.batch || {}, running = !!batch.running;
+    const selected = state.cameras.filter(camera => camera.authorized && batchSelection.has(String(camera.id)));
+    $('cam-batch-selection-count').textContent = selected.length + ' selected';
+    $('cam-batch-start').disabled = !!state.busy || running || !selected.length;
+    $('cam-batch-stop').disabled = !running;
+    $('cam-batch-select-all').disabled = $('cam-batch-clear').disabled = !!state.busy || running;
+    const currentCamera = batch.currentCamera && (state.cameras.find(camera => String(camera.id) === String(batch.currentCamera.id)) || batch.currentCamera);
+    $('cam-batch-current').textContent = currentCamera ? 'Current: ' + cameraDisplay(currentCamera) : running ? 'Preparing selected cameras…' : batch.message || 'Select registered cameras to run automatic checks.';
+    const total = Math.max(0, Number(batch.total) || 0), completed = Math.max(0, Number(batch.completed) || 0);
+    $('cam-batch-progress').max = total || 1; $('cam-batch-progress').value = Math.min(total, completed);
+    $('cam-batch-completed').textContent = completed + ' / ' + total;
+    $('cam-batch-successes').textContent = Number(batch.successes) || 0;
+    $('cam-batch-failures').textContent = Number(batch.failures) || 0;
+    $('cam-batch-snapshots').textContent = Number(batch.snapshotsSaved) || 0;
+    let summary = typeof batch.summary === 'string' ? batch.summary : batch.summary && batch.summary.message || '';
+    if (!summary && total && !running) summary = (batch.status === 'cancelled' || batch.status === 'stopped' ? 'Stopped' : batch.status === 'interrupted' ? 'Interrupted' : 'Finished') + ': ' + completed + ' of ' + total + ' cameras checked; ' + (Number(batch.successes) || 0) + ' successful connections, ' + (Number(batch.failures) || 0) + ' failures, ' + (Number(batch.snapshotsSaved) || 0) + ' snapshots saved.';
+    if (Number(batch.snapshotsFlagged) || Number(batch.snapshotFailures)) summary += ' ' + (Number(batch.snapshotsFlagged) || 0) + ' images flagged; ' + (Number(batch.snapshotFailures) || 0) + ' snapshot failures.';
+    $('cam-batch-summary').textContent = summary;
+    const rows = savedBatchRows(), list = $('cam-batch-results'); list.replaceChildren();
+    $('cam-batch-export').disabled = !rows.length;
+    for (const item of rows.slice().reverse()) {
+      const el = document.createElement('article'); el.className = 'cam-card cam-batch-result';
+      const rawStatus = item.connectionStatus || item.status || 'Completed';
+      const status = ({success:'Connected','authentication-failed':'Authentication failed',unreachable:'Unreachable',timeout:'Timed out',cancelled:'Stopped','snapshot-failed':'Snapshot failed'})[rawStatus] || String(rawStatus).replace(/[_-]/g, ' ');
+      el.innerHTML = '<h3>' + escapeHtml(item.cameraName || item.host || 'Camera') + '</h3><small>' + escapeHtml(item.host || '') + '</small><strong>' + escapeHtml(status) + (item.httpCode ? ' · HTTP ' + escapeHtml(item.httpCode) : '') + '</strong><div>' + escapeHtml(item.message || '') + '</div><small>' + escapeHtml(captureTime({timestamp:item.finishedAt || item.startedAt})) + ' · ' + (Number(item.snapshotsSaved) || 0) + ' snapshot(s) saved' + (Number(item.snapshotFailures) ? ' · ' + Number(item.snapshotFailures) + ' snapshot failure(s)' : '') + '</small>';
+      list.appendChild(el);
+    }
+    if (!rows.length) list.innerHTML = '<div class="empty">Completed checks will stay here for review and CSV export.</div>';
+  }
   function renderBusy() {
     $('cam-status').setAttribute('aria-busy', String(!!state.busy)); $('cam-cancel').classList.toggle('hidden', !state.busy);
     $('cam-capture').disabled = !!state.busy || !selectedCamera() || !selectedCamera().authorized;
+    $('cam-save-channels').disabled = !!state.busy || !selectedCamera() || !selectedCamera().authorized;
+    $('cam-save-presets').disabled = presetSavePending || !!state.busy;
+    $('cam-list').querySelectorAll('.batch-select').forEach(input => { const camera = state.cameras.find(item => String(item.id) === input.dataset.cameraId); input.disabled = !!state.busy || !!(state.batch && state.batch.running) || camera && !camera.authorized; });
+    renderBatch();
     updateMethod();
   }
   function authorizedAction(action, extra = {}) {
@@ -300,51 +374,78 @@
       const data = cameraFormData(); if (!data.authorized) return notify('Confirm camera authorization before saving.');
       if (/[:/?#@\s]/.test(data.host) && !/^\[[0-9a-f:]+\]$/i.test(data.host)) return notify('Enter only an IP address or hostname. Set the protocol, port and paths separately.');
       for (const key of ['httpPath','snapshotPath','mjpegPath','rtspPath','hlsPath']) if (/^\w+:\/\/[^/]*@/.test(data[key])) return notify('Keep usernames and passwords in Credentials, outside camera URLs.');
-      command('save-camera', data); persistDraft();
+      if (command('save-camera', data)) pendingCameraForm = {id:data.id,host:data.host,port:data.port};
+      persistDraft();
     };
     $('cam-open').onclick = () => authorizedAction('open-viewer', {method: $('cam-method').value});
     $('cam-test').onclick = () => authorizedAction('test-camera', {method: $('cam-method').value});
     $('cam-select-all').onclick = () => { $('cam-channels').querySelectorAll('input').forEach(el => el.checked = true); updateChannelCount(); };
     $('cam-select-none').onclick = () => { $('cam-channels').querySelectorAll('input').forEach(el => el.checked = false); updateChannelCount(); };
     $('cam-channels').onchange = updateChannelCount;
+    $('cam-add-channel').onclick = () => {
+      const channel = Number($('cam-custom-channel').value);
+      if (!Number.isInteger(channel) || channel < 1 || channel > 65535) return notify('Enter a channel number from 1 to 65535.');
+      const selected = [...new Set([...selectedChannels(), channel])];
+      if (selected.length > 64) return notify('Select up to 64 channels per camera.');
+      storage.write('camera-channels-' + selectedId, JSON.stringify(selected)); $('cam-custom-channel').value = ''; renderChannels();
+    };
+    $('cam-save-channels').onclick = () => {
+      const camera = selectedCamera(), channels = selectedChannels();
+      if (!camera || !camera.authorized) return notify('Select an authorized registered camera first.');
+      if (state.busy) return notify('Stop the current task before changing snapshot channels.');
+      if (!channels.length) return notify('Select at least one snapshot channel.');
+      command('save-camera', Object.assign({}, camera, {channels}));
+    };
     $('cam-capture').onclick = () => { const channels = selectedChannels(); if (!channels.length) return notify('Select at least one snapshot channel.'); authorizedAction('capture', {channels}); };
     $('cam-go-gallery').onclick = () => showTab('gallery');
     $('cam-cancel').onclick = () => command('cancel');
+    $('cam-batch-select-all').onclick = () => { batchSelection = new Set(state.cameras.filter(camera => camera.authorized).map(camera => String(camera.id))); rememberBatchSelection(); renderCameras(); };
+    $('cam-batch-clear').onclick = () => { batchSelection.clear(); rememberBatchSelection(); renderCameras(); };
+    $('cam-batch-start').onclick = () => {
+      if (state.busy || state.batch && state.batch.running) return notify('A camera task is already running.');
+      const cameraIds = state.cameras.filter(camera => camera.authorized && batchSelection.has(String(camera.id))).map(camera => camera.id);
+      if (!cameraIds.length) return notify('Select at least one registered camera for automatic checks.');
+      if (command('batch-start', {cameraIds})) {
+        state.busy = true; state.batch = {running:true,status:'running',total:cameraIds.length,completed:0,successes:0,failures:0,snapshotsSaved:0,message:'Preparing selected cameras…',results:[]};
+        $('cam-status-text').textContent = 'Automatic camera checks starting…'; renderBusy();
+      }
+    };
+    $('cam-batch-stop').onclick = () => { if (command('cancel')) { $('cam-batch-stop').disabled = true; $('cam-status-text').textContent = 'Stopping automatic camera checks…'; } };
+    $('cam-batch-export').onclick = () => command('batch-export');
+    $('cam-batch-diagnostics').onclick = () => { const exportButton = $('diag-export'); if (exportButton) exportButton.click(); };
     $('cam-refresh').onclick = $('cam-gallery-refresh').onclick = () => { refresh(); command('refresh'); };
     $('cam-import-config').onclick = () => command('import-config'); $('cam-export-config').onclick = () => command('export-config');
-    $('cam-snapshot-filter').oninput = $('cam-only-flagged').onchange = () => { galleryPage = 0; renderSnapshots(); };
+    $('cam-snapshot-filter').oninput = $('cam-only-flagged').onchange = $('cam-gallery-camera').onchange = $('cam-gallery-date').onchange = () => { galleryPage = 0; renderSnapshots(); };
+    $('cam-gallery-clear-filters').onclick = () => { $('cam-snapshot-filter').value = ''; $('cam-gallery-camera').value = ''; $('cam-gallery-date').value = ''; $('cam-only-flagged').checked = false; galleryPage = 0; renderSnapshots(); };
     $('cam-gallery-previous').onclick = () => { galleryPage = Math.max(0, galleryPage - 1); renderSnapshots(); };
     $('cam-gallery-next').onclick = () => { galleryPage++; renderSnapshots(); };
     $('cam-select-storage').onclick = () => command('select-storage');
     $('cam-delete-flagged').onclick = () => { const count = state.snapshots.filter(snapshot => snapshot.flagged).length; if (count && confirm('Permanently delete all ' + count + ' flagged snapshots, including exact duplicates and corrupted or empty downloads?')) command('delete-flagged'); };
-    $('cam-save-presets').onclick=()=>{
-      const username=$('cam-preset-username').value.trim();
-      if(!username || username.includes(':')) return notify('Enter a valid username before saving presets.');
-      const entries=[];
-      for(let i=1;i<=6;i++){
-        const password=$('cam-preset-'+i).value;
-        if(password) entries.push({id:'preset-'+i,name:'Password preset '+i,username,password});
-      }
-      if(!entries.length) return notify('Enter at least one new password to save.');
-      if(entries.some(e=>e.password.length>1024)) return notify('One password is too long.');
-      for(const entry of entries) command('save-credential',entry);
-      for(let i=1;i<=6;i++) $('cam-preset-'+i).value='';
-      notify('Saving '+entries.length+' encrypted preset(s). Assign one to each camera profile.');
+    $('cam-open-credential-settings').onclick = openCredentialSettings;
+    $('cam-preset-username').oninput = () => { usernameDirty = true; };
+    $('cam-save-presets').onclick = () => {
+      const username = $('cam-preset-username').value.trim();
+      if (username.includes(':') || /[\r\n\u0000]/.test(username) || username.length > 256) return notify('Enter a username without colons or line breaks, up to 256 characters.');
+      const presets = Array.from({length:6}, (_, i) => ({id:'preset-' + (i + 1), password:$('cam-preset-' + (i + 1)).value}));
+      if (!username && !state.usernameConfigured) return notify('Enter the shared camera username.');
+      if (!usernameDirty && !presets.some(preset => preset.password)) return notify('Enter a username change or a new password to save.');
+      if (presets.some(preset => preset.password.length > 1024)) return notify('One password is too long.');
+      if (command('save-presets', {username,presets})) { presetSavePending = true; renderCredentials(); }
     };
-    $('cam-new-credential').onclick = resetCredentialForm;
-    $('cam-credential-form').onsubmit = event => {
-      event.preventDefault(); const id = $('cam-credential-id').value;
-      const data = {id, name: $('cam-credential-name').value.trim(), username: $('cam-credential-user').value, password: $('cam-credential-password').value};
-      if (!id && !data.username.trim()) return notify('Enter the authorized camera username.');
-      if (command('save-credential', data)) { $('cam-credential-user').value = ''; $('cam-credential-password').value = ''; }
+    for (let i = 1; i <= 6; i++) $('cam-delete-preset-' + i).onclick = () => {
+      const id = 'preset-' + i, count = state.cameras.filter(camera => camera.credentialId === id).length;
+      if (confirm('Delete password preset ' + i + '?' + (count ? ' ' + count + ' camera profile(s) will need another assigned credential.' : ''))) command('save-presets', {presets:[{id,delete:true}]});
     };
+    $('cam-delete-all-presets').onclick = () => { if (confirm('Delete the saved shared username and all six password presets? Camera profiles and snapshots will remain. Existing legacy credentials will remain.')) { if (command('save-presets', {deleteUsername:true})) { usernameDirty = false; $('cam-preset-username').value = ''; for (let i=1;i<=6;i++) $('cam-preset-'+i).value = ''; } } };
     $('cam-history-filter').oninput = renderHistory;
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
     const nav = document.querySelector('.nav [data-view="cameras"]'); if (nav) nav.addEventListener('click', refresh);
+    const galleryNav = document.querySelector('.nav [data-view="gallery"]'); if (galleryNav) galleryNav.addEventListener('click', () => { refresh(); renderSnapshots(); });
   }
   window.receiveCameraNative = (kind, data) => {
     if (!initialized) init();
     data = data || {};
+    if (kind === 'batch-check' || kind === 'batch-snapshot-check') { addDiagnostic(data.error || data.message); return; }
     if (kind === 'camera-thumbnail') {
       if (typeof data.thumbnail === 'string' && /^data:image\/(jpeg|png|webp);base64,/.test(data.thumbnail)) {
         thumbnailCache.set(String(data.id), data.thumbnail);
@@ -358,6 +459,14 @@
       if (Array.isArray(data.cameras)) applyState(data); else if (data.state) applyState(data.state); else refresh();
       return;
     }
+    if (kind === 'batch-progress') {
+      state.batch = Object.assign({}, state.batch || {}, data);
+      if (typeof data.running === 'boolean') state.busy = data.running;
+      if (data.message) $('cam-status-text').textContent = data.message;
+      renderBusy();
+      if (!data.running && data.summary) addDiagnostic(typeof data.summary === 'string' ? data.summary : data.summary.message);
+      return;
+    }
     if (kind === 'camera-progress') {
       if (typeof data.busy === 'boolean') state.busy = data.busy;
       if (data.message) $('cam-status-text').textContent = data.message;
@@ -367,8 +476,37 @@
       renderBusy(); return;
     }
     const message = data.error || data.message || (data.ok === false ? 'Camera operation failed.' : 'Camera operation completed.');
+    if (data.action === 'save-camera' && data.ok === false) pendingCameraForm = null;
+    if (presetSavePending && data.action === 'save-presets') {
+      presetSavePending = false;
+      if (data.ok !== false && !data.error) {
+        usernameDirty = false;
+        for (let i = 1; i <= 6; i++) $('cam-preset-' + i).value = '';
+      }
+    }
     $('cam-status-text').textContent = message; addDiagnostic(message); notify(message); refresh();
     if (!state.busy) $('cam-progress').classList.add('hidden');
+  };
+  window.CameraManager = {
+    registerFromIp(host, port, source) {
+      init();
+      host = String(host || '').trim();
+      if (!host) return notify('Select an address to register as a camera.');
+      const selectedPort = Number(port);
+      const nav = document.querySelector('.nav [data-view="cameras"]'); if (nav) nav.click();
+      showTab('devices'); resetCameraForm();
+      $('cam-name').value = 'Camera ' + host; $('cam-host').value = host;
+      const rtsp = selectedPort === 554 || selectedPort === 8554;
+      $('cam-port').value = !rtsp && Number.isInteger(selectedPort) && selectedPort > 0 && selectedPort <= 65535 ? String(selectedPort) : '80';
+      $('cam-scheme').value = selectedPort === 443 || selectedPort === 8443 ? 'https' : 'http';
+      if (rtsp) { $('cam-rtsp-port').value = String(selectedPort); $('cam-rtsp-path').value = '/Streaming/Channels/{channel}'; }
+      $('cam-method').value = rtsp ? 'rtsp' : 'http'; updateMethod();
+      $('cam-authorized').checked = false; persistDraft();
+      addDiagnostic('Camera registration prepared from ' + String(source || 'IP List') + '. Review its connection settings and confirm authorization before saving.');
+      $('cam-form-heading').scrollIntoView({block:'start',behavior:'smooth'}); $('cam-name').focus();
+    },
+    showGallery() { init(); showTab('gallery'); refresh(); },
+    refresh
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

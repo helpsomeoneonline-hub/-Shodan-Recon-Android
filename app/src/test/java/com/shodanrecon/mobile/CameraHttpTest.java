@@ -93,6 +93,8 @@ public class CameraHttpTest {
                 "Digest realm=\"Camera\", nonce=\"nonce\", qop=\"auth-int\""));
         IOException failure = assertThrows(IOException.class, () -> new CameraHttp(camera, credential).get("/image.jpg"));
         assertTrue(failure.getMessage().contains("unsupported")); assertEquals(1, server.getRequestCount());
+        assertTrue(failure instanceof CameraHttp.StatusException);
+        assertEquals(401, ((CameraHttp.StatusException) failure).statusCode);
         assertFalse(failure.getMessage().contains("selected-device-password"));
     }
 
@@ -103,6 +105,8 @@ public class CameraHttpTest {
             server.enqueue(new MockResponse().setResponseCode(302).addHeader("Location", other.url("/image.jpg")));
             IOException failure = assertThrows(IOException.class, () -> new CameraHttp(camera, credential).get("/image.jpg"));
             assertTrue(failure.getMessage().contains("redirect")); assertEquals(2, server.getRequestCount());
+            assertTrue(failure instanceof CameraHttp.StatusException);
+            assertEquals(302, ((CameraHttp.StatusException) failure).statusCode);
             assertEquals(0, other.getRequestCount());
         } finally { other.shutdown(); }
     }

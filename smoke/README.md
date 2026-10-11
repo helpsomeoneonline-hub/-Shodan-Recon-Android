@@ -1,20 +1,39 @@
-# Emulator smoke verification
+# Emulator and update verification
 
-This workflow installs the exact APK from build run `38141506505` after it succeeds
-(application commit `9098d4c480b7961947b3663e7c35604c40fa8f0a`). A separately
-compiled Android instrumentation harness exercises that installed APK; it does
-not rebuild or modify the application.
+The pull-request **Build Android APK** workflow builds both the PR-base installed
+version and the new application. Its dependent emulator job downloads these exact
+same-run artifacts. The main-branch standalone **Android emulator smoke** workflow
+uses the successful build's exact run ID and commit SHA; manual runs require both
+values and verify them before downloading an APK.
 
-It checks first launch, the dashboard's fixed bottom navigation and touch
-targets in portrait and landscape, saved search input, Cameras navigation,
-empty gallery controls, a blank credential form, and native camera viewer
-launch and rotation. The fixture is a manually registered authorized loopback
-profile; **Connect, capture, scan and account-check are never invoked**. It uses
-no real API key, device password or camera network endpoint. The harness shares
-the public development signing identity required to instrument the debug APK.
+A separately compiled instrumentation harness uses the existing public development
+signing identity. It exercises the downloaded APKs without rebuilding the new app.
+The update check installs the base APK, saves synthetic search settings, a private
+IP, registered loopback camera and encrypted legacy credential, then installs the
+new APK with `adb install -r`. Matching certificate digests, installation success,
+retained data and original Android Keystore credential decryption are asserted.
 
-Screenshots, accessibility hierarchy XML, instrumentation results and
-AndroidRuntime error output are uploaded as `ShodanRecon-emulator-smoke`.
+UI checks cover portrait/landscape navigation, touch targets, persisted search
+inputs, Cameras/Gallery, exactly one shared username and six blank password inputs,
+successful saves/replacement, native validation failure and retry, hidden passwords,
+and native viewer launch/rotation without connecting the viewer.
+
+The batch fixture listens only on emulator `127.0.0.1`. It uses a synthetic HTTP
+Basic credential and generated 8×8 JPEGs. Selected registered cameras produce
+success → HTTP 401 → unreachable port → success; the harness checks request order,
+assigned-credential authentication, configured channel 101, counters and gallery.
+A stalled local request checks repeated Start, prompt Stop, retained cancelled
+outcome and prevention of later-camera requests. A process restart must retain
+completed/stopped reports, images and encrypted preset status. No Shodan API key,
+real camera, user password or external device network endpoint is contacted.
+
+`ShodanRecon-emulator-smoke` contains screenshots, accessibility hierarchy XML,
+installation and signing evidence, instrumentation results, completed/stopped batch
+JSON, local request order, restart review and AndroidRuntime output. The APK and
+JVM/lint reports remain separate artifacts.
+
 Emulator success does not verify real cameras, codecs, Shodan account access,
-physical device behavior or external Android file providers. An emulator or
-runner startup failure is an infrastructure failure, not a completed app test.
+physical device behavior or external Android file providers. The update test covers
+the preserved stable development certificate; it cannot establish compatibility
+with historical ephemeral signing keys. Runner/emulator startup failures are
+infrastructure failures, not completed application tests.
