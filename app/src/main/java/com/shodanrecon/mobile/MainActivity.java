@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_EXPORT = 502;
     private final ExecutorService pool = Executors.newFixedThreadPool(3);
     private final AtomicBoolean cancelLAN = new AtomicBoolean(false);
+    private final AtomicBoolean lanActive = new AtomicBoolean(false);
     private WebView webView;
     private SharedPreferences prefs;
     private String pendingCsv = "";
@@ -178,47 +179,77 @@ public class MainActivity extends Activity {
     private String formatIP(long value) {
         return ((value >>> 24) & 255) + "." + ((value >>> 16) & 255) + "." + ((value >>> 8) & 255) + "." + (value & 255);
     }
-    private void doLANScan(String start, String end, String portCSV) {
+    // Bounded TCP service inventory for a single authorized private IPv4 /24 network.
+    private void doLANScan(String start, String end, String portCSV, int workers) {
+        if (!lanActive.compareAndSet(false, true)) {
+            sendError("lan-done", "A LAN scan is already in progress"); return;
+        }
         cancelLAN.set(false);
+        ExecutorService workerPool = null;
         try {
-            long first = parseIPv4(start), last = parseIPv4(end);
-            if (last < first || last - first > 255) throw new Exception("Range must contain at most 256 addresses");
-            if (!privateIP(first) || !privateIP(last) || (first >>> 8) != (last >>> 8))
-                throw new Exception("LAN scan supports only one authorized private /24 network");
-            Set<Integer> ports = new HashSet<>();
+            final long firstIP = parseIPv4(start), lastIP = parseIPv4(end);
+            if (lastIP < firstIP || lastIP - firstIP > 255)
+                throw new Exception("Range must contain at most 256 addresses");
+            if (!privateIP(firstIP) || !privateIP(lastIP) || (firstIP >>> 8) != (lastIP >>> 8))
+                throw new Exception("LAN scan supports one authorized private /24 network only");
+            java.util.Set<Integer> portsSet = new java.util.HashSet<>();
             for (String part : portCSV.split(",")) {
                 if (part.trim().isEmpty()) continue;
                 int port = Integer.parseInt(part.trim());
-                if (port < 1 || port > 65535) throw new Exception("Ports must be between 1 and 65535");
-                ports.add(port);
-                if (ports.size() > 8) throw new Exception("Use at most 8 ports");
+                if (port < 1 || port > 65535) throw new Exception("Ports must be from 1 to 65535");
+                portsSet.add(port);
+                if (portsSet.size() > 8) throw new Exception("Use at most eight ports");
             }
-            if (ports.isEmpty()) throw new Exception("Enter at least one port");
-            int scanned = 0, discovered = 0;
-            for (long n = first; n <= last && !cancelLAN.get(); n++) {
-                String ip = formatIP(n);
-                for (int port : ports) {
-                    if (cancelLAN.get()) break;
-                    boolean open = false;
-                    try (Socket socket = new Socket()) { socket.connect(new InetSocketAddress(ip, port), 450); open = true; }
-                    catch (Exception ignored) {}
-                    if (open) {
-                        discovered++;
-                        JSONObject item = new JSONObject();
-                        item.put("ok", true); item.put("ip", ip); item.put("port", port);
-                        item.put("product", "TCP service"); item.put("country", "LAN");
-                        item.put("org", "Authorized private network");
-                        send("lan-match", item);
+            if (portsSet.isEmpty()) throw new Exception("Enter at least one port");
+            final java.util.List<Integer> ports = new java.util.ArrayList<>(portsSet);
+            java.util.Collections.sort(ports);
+            final int total = (int)(lastIP - firstIP + 1);
+            final java.util.concurrent.atomic.AtomicInteger nextIndex = new java.util.concurrent.atomic.AtomicInteger();
+            final java.util.concurrent.atomic.AtomicInteger scanned = new java.util.concurrent.atomic.AtomicInteger();
+            final java.util.concurrent.atomic.AtomicInteger found = new java.util.concurrent.atomic.AtomicInteger();
+            int workerCount = Math.max(1, Math.min(8, workers));
+            workerPool = Executors.newFixedThreadPool(workerCount);
+            java.util.List<java.util.concurrent.Future<?>> tasks = new java.util.ArrayList<>();
+            for (int i = 0; i < workerCount; i++) {
+                tasks.add(workerPool.submit(() -> {
+                    while (!cancelLAN.get()) {
+                        int position = nextIndex.getAndIncrement();
+                        if (position >= total) return;
+                        String ip = formatIP(firstIP + position);
+                        for (int port : ports) {
+                            if (cancelLAN.get()) break;
+                            try (Socket socket = new Socket()) {
+                                socket.connect(new InetSocketAddress(ip, port), 450);
+                                found.incrementAndGet();
+                                JSONObject item = new JSONObject();
+                                item.put("ok", true); item.put("ip", ip);
+                                item.put("port", port); item.put("product", "TCP service");
+                                item.put("country", "LAN");
+                                item.put("org", "Authorized private network");
+                                send("lan-match", item);
+                            } catch (Exception ignored) {}
+                        }
+                        JSONObject progress = new JSONObject();
+                        try {
+                            progress.put("ok", true);
+                            progress.put("scanned", scanned.incrementAndGet());
+                            progress.put("found", found.get());
+                            progress.put("total", total);
+                            send("lan-progress", progress);
+                        } catch (Exception ignored) {}
                     }
-                }
-                scanned++;
-                JSONObject progress = new JSONObject(); progress.put("ok", true);
-                progress.put("scanned", scanned); progress.put("found", discovered);
-                progress.put("total", last - first + 1); send("lan-progress", progress);
+                }));
             }
-            JSONObject done = new JSONObject(); done.put("ok", true); done.put("stopped", cancelLAN.get());
-            done.put("scanned", scanned); done.put("found", discovered); send("lan-done", done);
-        } catch (Exception ex) { sendError("lan-done", ex.getMessage()); }
+            for (java.util.concurrent.Future<?> task : tasks) task.get();
+            JSONObject done = new JSONObject();
+            done.put("ok", true); done.put("stopped", cancelLAN.get());
+            done.put("scanned", scanned.get()); done.put("found", found.get());
+            send("lan-done", done);
+        } catch(Exception e) { sendError("lan-done", e.getMessage()); }
+        finally {
+            if (workerPool != null) workerPool.shutdownNow();
+            lanActive.set(false);
+        }
     }
 
     public class Bridge {
@@ -253,7 +284,7 @@ public class MainActivity extends Activity {
             pool.submit(() -> { try { send("search", summarizeShodan(shodanRequest("shodan/host/search", query.trim(), page))); }
                 catch(Exception ex) { sendError("search", ex.getMessage()); } });
         }
-        @JavascriptInterface public void scanLAN(String start, String end, String ports) { pool.submit(() -> doLANScan(start, end, ports)); }
+        @JavascriptInterface public void scanLAN(String start, String end, String ports, int workers) { pool.submit(() -> doLANScan(start, end, ports, workers)); }
         @JavascriptInterface public void stopLAN() { cancelLAN.set(true); }
         @JavascriptInterface public void importIPs() {
             runOnUiThread(() -> {
