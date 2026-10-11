@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 — versionCode 4
+
+- Add private, size-bounded diagnostics journal recording Shodan HTTP/network failures, private-LAN scan outcomes, camera operations and viewer failures.
+- Add Settings > Diagnostic log with read-only preview, clear and Android TXT export; attach the TXT file in ChatGPT for troubleshooting.
+- Record JavaScript runtime and console errors without logging source text, sensitive URLs or device passwords.
+- Keep APK build signing identity, app data and existing functions unchanged.
+
+
 ## 1.2.0 — versionCode 3
 
 - Extend the existing app with registered cameras and encrypted device credentials.
