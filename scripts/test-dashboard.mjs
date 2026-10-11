@@ -198,6 +198,15 @@ test('selected IP scanning requires explicit scope authorization and omits publi
   assert.equal(config.authorized, true); assert.equal(config.delayMs, 2000); assert.equal(config.workers, 20);
 });
 
+test('private-network workers are capped to 20 and can be reduced', () => {
+  const ui = dashboard({ ipList: ['192.168.1.10'], selectedIPs: ['192.168.1.10'] });
+  ui.click('scan-selected-ips');
+  ui.element('scan-authorized').checked = true;
+  ui.input('lan-workers', 100);
+  ui.click('start-search');
+  assert.equal(JSON.parse(ui.callsTo('scanAuthorized')[0].args[0]).workers, 20);
+});
+
 test('CSV export neutralizes spreadsheet formula prefixes and quotes fields', () => {
   const ui = dashboard({ results: [result('192.168.1.2', 80, '=SUM(1,2)')] });
   ui.click('export-results'); const csv = ui.callsTo('exportCsv')[0].args[0];
