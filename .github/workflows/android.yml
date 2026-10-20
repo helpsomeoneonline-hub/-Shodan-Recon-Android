@@ -51,6 +51,12 @@ jobs:
         run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
       - name: Verify packaged APK
         run: python3 scripts/verify-package.py --apk app/build/outputs/apk/debug/app-debug.apk
+      - name: Sign and verify permanent APK certificate
+        env:
+          ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: bash scripts/sign-github-apk.sh app/build/outputs/apk/debug/app-debug.apk
       - name: Upload verification reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,6 +85,13 @@ jobs:
       - name: Build installed-version baseline APK
         if: github.event_name == 'pull_request'
         run: gradle --no-daemon -p update-baseline :app:assembleDebug
+      - name: Sign installed-version baseline with permanent key
+        if: github.event_name == 'pull_request'
+        env:
+          ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: bash scripts/sign-github-apk.sh update-baseline/app/build/outputs/apk/debug/app-debug.apk
       - name: Upload installed-version baseline
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
